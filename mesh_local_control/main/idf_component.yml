@@ -1,0 +1,13 @@
+dependencies:
+  idf: '>=5.0'
+  mesh_lite:
+    version: '*'
+  usb_device:
+    git: https://github.com/espressif/esp-iot-bridge.git
+    path: components/usb/usb_device
+    rules:
+    - if: target in [esp32s2, esp32s3]
+    - if: idf_version < 5.1.4
+  wifi_provisioning:
+    git: https://github.com/espressif/esp-mesh-lite.git
+    path: components/wifi_provisioning
