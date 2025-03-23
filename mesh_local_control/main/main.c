@@ -3,6 +3,7 @@
 #include "mesh_networking.h"
 #include "wifi_networking.h"
 #include "my_utility.h"
+#include "blockchain.h"
 #include "temperature_probe.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
@@ -85,5 +86,8 @@ void app_main()
 
     i2c_master_init();
     temperature_probe_init();
-    xTaskCreate(temperature_task, "temperature_task", 4096, NULL, 5, NULL);
+
+    vTaskDelay(3000/portTICK_PERIOD_MS);    
+
+    xTaskCreate(sensor_blockchain_task, "sensor_blockchain_task", 4096 * 2, NULL, 5, NULL);
 }
