@@ -10,6 +10,8 @@
 #include "driver/i2c.h"
 #include "driver/gpio.h"
 #include "esp_log.h"
+#include "node_response.h"
+#include "election_response.h"
 
 #define PAYLOAD_LEN       (1456) /**< Max payload size(in bytes) */
 #define UART_PORT_NUM       UART_NUM_1
@@ -36,7 +38,7 @@ static void i2c_master_init(void) {
     i2c_param_config(I2C_MASTER_PORT_NUM, &conf);
     esp_err_t ret = i2c_driver_install(I2C_MASTER_PORT_NUM, conf.mode, 0, 0, 0);
     if(ret != ESP_OK) {
-        ESP_LOGE("main", "i2c_driver_install failed");
+        ESP_LOGE(TAG, "i2c_driver_install failed");
     }
 }
 
@@ -58,7 +60,7 @@ void app_main()
 
     esp_mesh_lite_config_t mesh_lite_config = ESP_MESH_LITE_DEFAULT_INIT();
     mesh_lite_config.join_mesh_ignore_router_status = true;
-    mesh_lite_config.join_mesh_without_configured_wifi = true;
+    // mesh_lite_config.join_mesh_without_configured_wifi = true;
     esp_mesh_lite_init(&mesh_lite_config);
 
     app_wifi_set_softap_info();
@@ -70,15 +72,15 @@ void app_main()
      */
     ESP_ERROR_CHECK(esp_event_handler_instance_register(IP_EVENT, IP_EVENT_STA_GOT_IP, &ip_event_sta_got_ip_handler, NULL, NULL));
 
-    // TimerHandle_t timer = xTimerCreate("print_system_info", 10000 / portTICK_PERIOD_MS,
-    //                                    true, NULL, print_system_info_timercb);
-    // xTimerStart(timer, 0);
+    TimerHandle_t timer = xTimerCreate("print_system_info", 10000 / portTICK_PERIOD_MS,
+                                       true, NULL, print_system_info_timercb);
+    xTimerStart(timer, 0);
 
     // Register ESPNOW receive callback
     esp_mesh_lite_espnow_recv_cb_register(ESPNOW_DATA_TYPE_RESERVE, espnow_recv_cb);
     add_self_broadcast_peer();
 
-    xTaskCreate(espnow_periodic_send_task, "espnow_periodic_send_task", 4096, NULL, 5, NULL);
+    // xTaskCreate(espnow_periodic_send_task, "espnow_periodic_send_task", 4096, NULL, 5, NULL);
 
     // ESP_LOGW(TAG, "-----");
     // esp_mesh_lite_report_info();
@@ -86,6 +88,8 @@ void app_main()
 
     i2c_master_init();
     temperature_probe_init();
+    node_response_init();
+    election_response_init();
 
     vTaskDelay(3000/portTICK_PERIOD_MS);    
 

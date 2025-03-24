@@ -8,6 +8,7 @@
 #include <stdbool.h>
 #include <inttypes.h>  // For PRIu32
 #include "esp_mesh_lite.h"  // New: for getting mesh node list
+#include "election_response.h"
 
 static const char *TAG = "CONSENSUS";
 static uint16_t my_node_id = 0;
@@ -23,21 +24,29 @@ void consensus_init(uint16_t node_id)
 bool consensus_am_i_leader(uint32_t block_id)
 {
     uint32_t nodes_count = 0;
-    // Get the list of online nodes (excluding self)
     const node_info_list_t *node_list = esp_mesh_lite_get_nodes_list(&nodes_count);
+    if (!node_list) {
+        ESP_LOGE(TAG, "Failed to get node list. Mesh uninitialized?");
+        return false;
+    }
+    if (nodes_count == 0) {
+        return false;
+    }
     ESP_LOGI(TAG, "Node %" PRIu16 ": Received %" PRIu32 " online nodes", my_node_id, nodes_count);
-    // Total online nodes = online list + self.
-    uint32_t total_online = nodes_count + 1;
-    ESP_LOGI(TAG, "Total online nodes: %" PRIu32, total_online);
-    ESP_LOGI(TAG, "Node %" PRIu16 ": Checking if I am the leader for Block %" PRIu32, my_node_id, block_id);
 
-    // Seed random generator with block_id and current time.
+    // Compute candidate leader index using existing randomness.
     srand(block_id + (uint32_t)time(NULL));
-    uint32_t leader_index = rand() % total_online;
-
+    uint32_t leader_index = rand() % nodes_count;
     bool result = (leader_index == 0);
-    ESP_LOGI(TAG, "Block %" PRIu32 ": Elected Leader index %" PRIu32 " out of %" PRIu32 " nodes. Am I leader? %s",
-             block_id, leader_index, total_online, result ? "Yes" : "No");
+    ESP_LOGI(TAG, "Block %" PRIu32 ": Computed leader index %" PRIu32 " out of %" PRIu32 " nodes. Am I leader? %s",
+            block_id, leader_index, nodes_count, result ? "Yes" : "No");
+
+    // Check if an election message was already received (non-blocking).
+    uint16_t election_override = 0;
+    if (waitForElectionMessage(&election_override, 0)) {
+        ESP_LOGI(TAG, "Election override received, next leader = %hu", election_override);
+        result = (election_override == get_my_node_id());
+    }
     return result;
 }
 

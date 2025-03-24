@@ -2,6 +2,10 @@
 #define MESH_NETWORKING_H
 
 #include "my_includes.h"
+#include "blockchain.h"
+#include "temperature_probe.h"
+#include "node_id.h"
+#include "consensus.h"
 
 void espnow_recv_cb(const uint8_t *mac_addr, const uint8_t *data, int len);
 void add_self_broadcast_peer(void);

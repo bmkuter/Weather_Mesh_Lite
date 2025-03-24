@@ -1,4 +1,6 @@
 #include "mesh_networking.h"
+#include "node_response.h"
+#include "election_response.h"
 
 static const char *TAG = "mesh_networking";
 
@@ -8,12 +10,62 @@ void espnow_recv_cb(const uint8_t *mac_addr, const uint8_t *data, int len)
 {
     if (strncmp((const char *)data, "ACK", len) == 0) {
         ESP_LOGI(TAG, "Got ACK from " MACSTR, MAC2STR(mac_addr));
-    } else {
-        ESP_LOGI(TAG, "Received '%.*s' from " MACSTR ", responding with ACK", len, data, MAC2STR(mac_addr));
-        const char *ack = "ACK";
-        esp_err_t ret = espnow_send_wrapper(ESPNOW_DATA_TYPE_RESERVE, (uint8_t *)mac_addr, (const uint8_t *)ack, strlen(ack));
-        if (ret != ESP_OK) {
-            ESP_LOGE(TAG, "Failed to send ACK to " MACSTR ", err=0x%x:%s", MAC2STR(mac_addr), ret, esp_err_to_name(ret));
+    }
+    else if (strncmp((const char *)data, "PULSE", 5) == 0) {
+        // Received pulse from leader: take a sensor reading and reply with sensor data.
+        uint16_t node_id = get_my_node_id();
+        float temp = temperature_probe_read_temperature();
+        float humidity = temperature_probe_read_humidity();
+        uint32_t now = (uint32_t)time(NULL);
+        char sensor_msg[128];
+        snprintf(sensor_msg, sizeof(sensor_msg), "SENSOR_DATA:%d:%.2f:%.2f:%lu", node_id, temp, humidity, now);
+        esp_err_t ret = espnow_send_wrapper(ESPNOW_DATA_TYPE_RESERVE, mac_addr,
+                                            (const uint8_t *)sensor_msg, strlen(sensor_msg));
+        if(ret != ESP_OK) {
+            ESP_LOGE(TAG, "Failed to send sensor data to leader " MACSTR, MAC2STR(mac_addr));
+        } else {
+            ESP_LOGI(TAG, "Sensor data sent to leader: %s", sensor_msg);
+        }
+    }
+    else if (strncmp((const char *)data, "CHAIN_REQ", 9) == 0) {
+        // Another node requests the blockchain (e.g., after rejoining).
+        // If this node is the leader (dummy check here), respond accordingly.
+        if (consensus_am_i_leader(0)) { // Replace 0 with proper logic to determine leader status.
+            const char *resp = "CHAIN_RESP:Blockchain syncing not implemented";
+            esp_err_t ret = espnow_send_wrapper(ESPNOW_DATA_TYPE_RESERVE, mac_addr,
+                                                (const uint8_t *)resp, strlen(resp));
+            if(ret != ESP_OK) {
+                ESP_LOGE(TAG, "Failed to send blockchain sync response to " MACSTR, MAC2STR(mac_addr));
+            }
+        }
+    }
+    else if (strncmp((const char *)data, "ELECTION:", 9) == 0) {
+         uint16_t next_leader = 0;
+         sscanf((const char *)data, "ELECTION:%hu", &next_leader);
+         election_response_push(mac_addr, next_leader);
+         ESP_LOGI(TAG, "Election message from " MACSTR ": next leader = %hu", MAC2STR(mac_addr), next_leader);
+    }
+    else if (len == sizeof(block_t)) {
+        // Received a block from the leader.
+        blockchain_receive_block(data, len);
+    }
+    else {
+        // Check for sensor data submission.
+        if (strncmp((const char *)data, "SENSOR_DATA:", 12) == 0) {
+            ESP_LOGI(TAG, "Received sensor data from " MACSTR ": %.*s", MAC2STR(mac_addr), len, data);
+            // Parse the sensor data.
+            sensor_record_t sensorData = {0};
+            // Example expected format: "SENSOR_DATA:node_id:temperature:humidity:timestamp"
+            // You may need to adjust parsing based on the actual message format.
+            sscanf((const char *)data, "SENSOR_DATA:%hu:%f:%f:%lu",
+                   &sensorData.node_id,
+                   &sensorData.temperature,
+                   &sensorData.humidity,
+                   &sensorData.timestamp);
+            // Push the parsed data into the response queue.
+            node_response_push(mac_addr, &sensorData);
+        } else {
+            ESP_LOGI(TAG, "Received unknown message from " MACSTR ": %.*s", MAC2STR(mac_addr), len, data);
         }
     }
 }

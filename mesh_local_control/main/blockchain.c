@@ -7,6 +7,9 @@
 #include "mesh_networking.h"
 #include "node_id.h"
 #include "esp_log.h"
+#include "node_response.h"
+#include "election_response.h"
+#include "esp_mesh_lite.h"
 
 #define BLOCKCHAIN_BUFFER_SIZE 16  // Maximum blocks stored locally
 
@@ -152,6 +155,8 @@ void blockchain_print_history(void)
 // In sensor_blockchain_task: update timestamp and calculate hash before Proof-of-participation.
 void sensor_blockchain_task(void *pvParameters)
 {
+    uint32_t elected_leader = 0;
+
     uint32_t err_status = 0;
     err_status = blockchain_init();
     if (err_status != 0)
@@ -167,50 +172,100 @@ void sensor_blockchain_task(void *pvParameters)
     ESP_LOGI(TAG, "Starting sensor_blockchain_task");
 
     while (1) {
-        // Get the current sensor reading.
-        sensor_record_t my_sensor = {0};
-        my_sensor.node_id = get_my_node_id();
-        my_sensor.timestamp = (uint32_t)time(NULL);
-        my_sensor.temperature = temperature_probe_read_temperature();
-        my_sensor.humidity = temperature_probe_read_humidity();
-        // (Optionally, you can also fill in neighbor RSSI values here.)
-
-        // For this example, create a block that contains only this node’s sensor data.
-        sensor_record_t sensor_data[MAX_NODES] = {0};
-        sensor_data[0] = my_sensor;
-
-        block_t new_block;
-        blockchain_create_block(&new_block, sensor_data);
-        // Ensure fresh timestamp from the task.
-        new_block.timestamp = (uint32_t)time(NULL);
-        // Calculate new hash for the block.
-        calculate_merkle_root(&new_block);
-        // Generate Proof-of-participation after hash calculation.
-        consensus_generate_pop_proof(&new_block, get_my_node_id());
-
-        // If this node is the leader, send the block.
-        if (consensus_am_i_leader(new_block.block_id)) {
+        uint32_t my_node_id = esp_mesh_lite_get_mesh_node_number();
+        ESP_LOGI(TAG, "Node ID: %d", my_node_id);
+        if (elected_leader == my_node_id) 
+        {
+            const char *pulse_msg = "PULSE";
             uint32_t node_count = 0;
-            // Get the list of nodes in the mesh.
             const node_info_list_t *list = esp_mesh_lite_get_nodes_list(&node_count);
+            int sensor_index = 1; // leader's sensor data is in new_block.node_data[0]
+
+            // Get the current sensor reading for the leader itself.
+            sensor_record_t my_sensor = {0};
+            my_sensor.node_id = get_my_node_id();
+            my_sensor.timestamp = (uint32_t)time(NULL);
+            my_sensor.temperature = temperature_probe_read_temperature();
+            my_sensor.humidity = temperature_probe_read_humidity();
+            sensor_record_t sensor_data[MAX_NODES] = {0};
+            sensor_data[0] = my_sensor;
+
+            block_t new_block;
+            blockchain_create_block(&new_block, sensor_data);
+            // Ensure fresh timestamp.
+            new_block.timestamp = (uint32_t)time(NULL);
+            // Calculate new hash for the block.
+            // (The leader will include its own sensor data along with others if available.)
+            calculate_merkle_root(&new_block);
+            // Generate Proof-of-participation.
+            consensus_generate_pop_proof(&new_block, get_my_node_id());
+
             while (list) {
-                esp_err_t ret = espnow_send_wrapper(ESPNOW_DATA_TYPE_RESERVE,
-                                                    list->node->mac_addr,
-                                                    (const uint8_t *)&new_block,
-                                                    sizeof(new_block));
+                ESP_LOGI(TAG, "Sending pulse to " MACSTR, MAC2STR(list->node->mac_addr));
+                esp_err_t ret = espnow_send_wrapper(ESPNOW_DATA_TYPE_RESERVE, list->node->mac_addr,
+                                                    (const uint8_t *)pulse_msg, strlen(pulse_msg));
                 if (ret != ESP_OK) {
-                    ESP_LOGE(TAG, "Failed to send block to " MACSTR
-                                     ", ret=0x%x:%s", MAC2STR(list->node->mac_addr), ret, esp_err_to_name(ret));
+                    ESP_LOGE(TAG, "Failed to send pulse to " MACSTR, MAC2STR(list->node->mac_addr));
+                }
+                sensor_record_t response = {0};
+                if (waitForNodeResponse(list->node->mac_addr, &response, pdMS_TO_TICKS(5000))) {
+                    if (sensor_index < MAX_NODES) {
+                        new_block.node_data[sensor_index] = response;
+                        sensor_index++;
+                    } else {
+                        ESP_LOGW(TAG, "Max node data reached, ignoring response from " MACSTR, MAC2STR(list->node->mac_addr));
+                    }
+                } else {
+                    ESP_LOGE(TAG, "No response from " MACSTR, MAC2STR(list->node->mac_addr));
                 }
                 list = list->next;
             }
-            ESP_LOGI(TAG, "Block %" PRIu32 " broadcast", new_block.block_id);
-            ESP_LOGI(TAG, "Block Data: Temp: %.2f°C, Humidity: %.2f%%",
+            ESP_LOGI(TAG, "All sensor responses processed");
+            ESP_LOGW(TAG, "Block %" PRIu32 " broadcast", new_block.block_id);
+            ESP_LOGW(TAG, "Block Data: Temp: %.2f°C, Humidity: %.2f%%",
                      my_sensor.temperature, my_sensor.humidity);
             blockchain_add_block(&new_block);
-        } else {
+            // Election process: current leader obtains the full list and randomly selects one node.
+            node_info_list_t *node_list = esp_mesh_lite_get_nodes_list(&node_count);
+            if (node_list != NULL && node_count > 0) {
+                uint32_t index = rand() % node_count;
+                node_info_list_t *selected = node_list;
+                for (uint32_t i = 0; i < index; i++) {
+                    selected = selected->next;
+                }
+                // Assume that the selected node structure carries a unique node_id.
+                uint16_t next_leader = selected->node->node_id;
+                char election_msg[64];
+                snprintf(election_msg, sizeof(election_msg), "ELECTION:%hu", next_leader);
+                // Broadcast the nomination to the entire network.
+                uint8_t bcast_mac[ESP_NOW_ETH_ALEN] = {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF};
+                esp_err_t ret_e = espnow_send_wrapper(ESPNOW_DATA_TYPE_RESERVE, bcast_mac,
+                                                       (const uint8_t *)election_msg, strlen(election_msg));
+                if(ret_e != ESP_OK) {
+                    ESP_LOGE(TAG, "Failed to broadcast election message, err: %s", esp_err_to_name(ret_e));
+                }
+            } else {
+                ESP_LOGW(TAG, "No nodes available for election");
+            }
+        } 
+        else 
+        {
             ESP_LOGI(TAG, "Not leader for Block %" PRIu32 ", waiting for leader broadcast", new_block.block_id);
+            // Non-leader: poll for election message from current leader.
+            if (waitForElectionMessage(&elected_leader, pdMS_TO_TICKS(10000))) {
+                ESP_LOGI(TAG, "Election message received: next leader = %hu", elected_leader);
+                if (elected_leader == get_my_node_id()) {
+                    ESP_LOGI(TAG, "I am elected as next leader. Preparing to lead next round.");
+                    // (Optionally trigger leader initialization.)
+                } else {
+                    ESP_LOGI(TAG, "Awaiting block broadcast from elected leader.");
+                    // Block broadcast reception is handled elsewhere (e.g. via espnow_recv_cb -> blockchain_receive_block)
+                }
+            } else {
+                ESP_LOGW(TAG, "No election message received. Continuing polling.");
+            }
         }
+        blockchain_print_history();
 
         // Wait for 60 seconds before generating the next block.
         vTaskDelay(pdMS_TO_TICKS(60000));
