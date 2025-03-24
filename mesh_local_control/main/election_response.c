@@ -1,27 +1,20 @@
 #include "election_response.h"
 #include <string.h>
 
-typedef struct {
-    uint8_t mac[6];
-    uint16_t next_leader;
-} election_message_t;
-
-#define ELECTION_QUEUE_LENGTH 10
 static QueueHandle_t electionQueue = NULL;
 
-void election_response_push(const uint8_t *src_mac, uint16_t next_leader) {
+void election_response_push(const uint8_t *src_mac, const uint8_t *leader_mac) {
     if (!electionQueue) return;
     election_message_t msg;
-    memcpy(msg.mac, src_mac, sizeof(msg.mac));
-    msg.next_leader = next_leader;
+    memcpy(msg.leader_mac, leader_mac, sizeof(msg.leader_mac));
     xQueueSend(electionQueue, &msg, 0);
 }
 
-bool waitForElectionMessage(uint16_t *next_leader, TickType_t timeout) {
+bool waitForElectionMessage(uint8_t *leader_mac, TickType_t timeout) {
     if (!electionQueue) return false;
     election_message_t msg;
     if (xQueueReceive(electionQueue, &msg, timeout) == pdPASS) {
-        *next_leader = msg.next_leader;
+        memcpy(leader_mac, msg.leader_mac, sizeof(msg.leader_mac));
         return true;
     }
     return false;

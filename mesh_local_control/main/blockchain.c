@@ -1,7 +1,7 @@
 #include <time.h>
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
-#include "temperature_probe.h"  // Provides temperature_probe_read_temperature() and ..._humidity()
+#include "temperature_probe.h"
 #include "blockchain.h"
 #include "consensus.h"
 #include "mesh_networking.h"
@@ -21,7 +21,7 @@ static SemaphoreHandle_t blockchain_mutex = NULL;
 // Add a helper function to compute a dummy merkle root.
 static void calculate_merkle_root(block_t *block) {
     // Simple dummy hash: use XOR of block_id and timestamp for every byte.
-    uint8_t hash = (uint8_t)(block->block_id ^ block->timestamp);
+    uint8_t hash = (uint8_t)(block->timestamp & 0xFF);
     for (int i = 0; i < sizeof(block->merkle_root); i++) {
         block->merkle_root[i] = hash;
     }
@@ -75,13 +75,16 @@ void blockchain_print_last_block(void)
     block_t last;
     if (blockchain_get_last_block(&last)) {
         ESP_LOGI(TAG, "----- Latest Block -----");
-        ESP_LOGI(TAG, "Block ID: 0x%" PRIx32 ", Timestamp: 0x%" PRIx32, last.block_id, last.timestamp);
+        ESP_LOGI(TAG, "Timestamp: 0x%" PRIx32, last.timestamp);
+        ESP_LOGI(TAG, "Merkle Root: " MACSTR, last.merkle_root[0], last.merkle_root[1],
+                 last.merkle_root[2], last.merkle_root[3], last.merkle_root[4], last.merkle_root[5]);
         ESP_LOGI(TAG, "PoP Proof: %s", last.pop_proof);
         for (int i = 0; i < MAX_NODES; i++) {
             sensor_record_t *record = &last.node_data[i];
-            if (record->node_id != 0) {
-                ESP_LOGI(TAG, "Node %d: Temp: %.2f°C, Humidity: %.2f%%",
-                         record->node_id, record->temperature, record->humidity);
+            // Print sensor data if MAC is not all zeros.
+            if (record->mac[0] != 0) {
+                ESP_LOGI(TAG, "Sensor " MACSTR ": Temp: %.2f°C, Humidity: %.2f%%",
+                         MAC2STR(record->mac), record->temperature, record->humidity);
             }
         }
         ESP_LOGI(TAG, "------------------------");
@@ -95,7 +98,6 @@ void blockchain_create_block(block_t *new_block, sensor_record_t sensor_data[MAX
 {
     memset(new_block, 0, sizeof(block_t));
     new_block->timestamp = (uint32_t)time(NULL);
-    new_block->block_id = blockchain_size;  // Use current blockchain size as block ID
 
     block_t last;
     if (blockchain_get_last_block(&last)) {
@@ -124,9 +126,9 @@ void blockchain_receive_block(const uint8_t *data, uint16_t len)
     block_t incoming_block;
     memcpy(&incoming_block, data, len);
     if (blockchain_add_block(&incoming_block)) {
-        ESP_LOGI(TAG, "Block 0x%" PRIx32 " received and added", incoming_block.block_id);
+        ESP_LOGI(TAG, "Block with Timestamp 0x%" PRIx32 " received and added", incoming_block.timestamp);
     } else {
-        ESP_LOGE(TAG, "Failed to add received block 0x%" PRIx32, incoming_block.block_id);
+        ESP_LOGE(TAG, "Failed to add received block (Timestamp 0x%" PRIx32 ")", incoming_block.timestamp);
     }
 }
 
@@ -137,13 +139,15 @@ void blockchain_print_history(void)
         ESP_LOGI(TAG, "===== Blockchain History =====");
         for (size_t i = 0; i < blockchain_size; i++) {
             block_t *current = &blockchain_buffer[i];
-            ESP_LOGI(TAG, "Block %d: ID=0x%" PRIx32 ", Timestamp=0x%" PRIx32, i, current->block_id, current->timestamp);
+            ESP_LOGI(TAG, "Block %d: Timestamp=0x%" PRIx32, i, current->timestamp);
+            ESP_LOGI(TAG, "Merkle Root: " MACSTR, current->merkle_root[0], current->merkle_root[1],
+                     current->merkle_root[2], current->merkle_root[3], current->merkle_root[4], current->merkle_root[5]);
             ESP_LOGI(TAG, "PoP Proof: %s", current->pop_proof);
             for (int j = 0; j < MAX_NODES; j++) {
                 sensor_record_t *record = &current->node_data[j];
-                if (record->node_id != 0) {
-                    ESP_LOGI(TAG, "  Node %d: Temp: %.2f°C, Humidity: %.2f%%",
-                             record->node_id, record->temperature, record->humidity);
+                if (record->mac[0] != 0) {
+                    ESP_LOGI(TAG, "  Sensor " MACSTR ": Temp: %.2f°C, Humidity: %.2f%%",
+                             MAC2STR(record->mac), record->temperature, record->humidity);
                 }
             }
         }
@@ -155,7 +159,7 @@ void blockchain_print_history(void)
 // In sensor_blockchain_task: update timestamp and calculate hash before Proof-of-participation.
 void sensor_blockchain_task(void *pvParameters)
 {
-    uint32_t elected_leader = 0;
+    uint8_t elected_leader_mac[ESP_NOW_ETH_ALEN] = {0};
 
     uint32_t err_status = 0;
     err_status = blockchain_init();
@@ -167,14 +171,32 @@ void sensor_blockchain_task(void *pvParameters)
     }
     
     ESP_LOGV(TAG, "Blockchain initialized");
-    consensus_init(get_my_node_id());
+    consensus_init();
 
     ESP_LOGI(TAG, "Starting sensor_blockchain_task");
 
     while (1) {
-        uint32_t my_node_id = esp_mesh_lite_get_mesh_node_number();
-        ESP_LOGI(TAG, "Node ID: %d", my_node_id);
-        if (elected_leader == my_node_id) 
+        uint8_t my_mac[ESP_NOW_ETH_ALEN] = {0};
+        esp_wifi_get_mac(ESP_IF_WIFI_STA, my_mac);
+        ESP_LOGI(TAG, "My MAC: " MACSTR, MAC2STR(my_mac));
+
+        uint32_t solo_node_count = 0;
+        const node_info_list_t *solo_list = esp_mesh_lite_get_nodes_list(&solo_node_count);
+        if (solo_node_count == 0)   // No nodes in the network
+        {   
+            ESP_LOGI(TAG, "No nodes in the network. Mesh still forming?");
+            vTaskDelay(pdMS_TO_TICKS(5000));
+            continue;
+        }
+        
+        if (solo_node_count == 1)   // Only one node in the network 
+        {
+            ESP_LOGI(TAG, "Only one node in the network. Acting as leader.");
+            memcpy(elected_leader_mac, solo_list->node->mac_addr, ESP_NOW_ETH_ALEN);
+        }
+
+        // If our MAC matches the elected leader MAC, we act as leader.
+        if (consensus_am_i_leader(elected_leader_mac)) 
         {
             const char *pulse_msg = "PULSE";
             uint32_t node_count = 0;
@@ -183,7 +205,7 @@ void sensor_blockchain_task(void *pvParameters)
 
             // Get the current sensor reading for the leader itself.
             sensor_record_t my_sensor = {0};
-            my_sensor.node_id = get_my_node_id();
+            memcpy(my_sensor.mac, my_mac, ESP_NOW_ETH_ALEN);
             my_sensor.timestamp = (uint32_t)time(NULL);
             my_sensor.temperature = temperature_probe_read_temperature();
             my_sensor.humidity = temperature_probe_read_humidity();
@@ -198,7 +220,7 @@ void sensor_blockchain_task(void *pvParameters)
             // (The leader will include its own sensor data along with others if available.)
             calculate_merkle_root(&new_block);
             // Generate Proof-of-participation.
-            consensus_generate_pop_proof(&new_block, get_my_node_id());
+            consensus_generate_pop_proof(&new_block, my_mac);
 
             while (list) {
                 ESP_LOGI(TAG, "Sending pulse to " MACSTR, MAC2STR(list->node->mac_addr));
@@ -221,40 +243,43 @@ void sensor_blockchain_task(void *pvParameters)
                 list = list->next;
             }
             ESP_LOGI(TAG, "All sensor responses processed");
-            ESP_LOGW(TAG, "Block %" PRIu32 " broadcast", new_block.block_id);
             ESP_LOGW(TAG, "Block Data: Temp: %.2f°C, Humidity: %.2f%%",
                      my_sensor.temperature, my_sensor.humidity);
             blockchain_add_block(&new_block);
-            // Election process: current leader obtains the full list and randomly selects one node.
-            node_info_list_t *node_list = esp_mesh_lite_get_nodes_list(&node_count);
-            if (node_list != NULL && node_count > 0) {
-                uint32_t index = rand() % node_count;
-                node_info_list_t *selected = node_list;
-                for (uint32_t i = 0; i < index; i++) {
-                    selected = selected->next;
+            // Election process: current leader obtains the full list, randomly selects one node,
+            // then broadcasts that node's MAC address as the next leader.
+            {
+                uint32_t node_count = 0;
+                node_info_list_t *node_list = esp_mesh_lite_get_nodes_list(&node_count);
+                if (node_list != NULL && node_count > 0) {
+                    uint32_t index = rand() % node_count;
+                    node_info_list_t *selected = node_list;
+                    for (uint32_t i = 0; i < index; i++) {
+                        selected = selected->next;
+                    }
+                    char election_msg[64];
+                    // Format election message with the selected node's MAC address.
+                    // MACSTR expects 6 hex values.
+                    snprintf(election_msg, sizeof(election_msg), "ELECTION:" MACSTR,
+                             MAC2STR(selected->node->mac_addr));
+                    // Broadcast the election message using the broadcast MAC address.
+                    uint8_t bcast_mac[ESP_NOW_ETH_ALEN] = {0xFF,0xFF,0xFF,0xFF,0xFF,0xFF};
+                    esp_err_t ret_e = espnow_send_wrapper(ESPNOW_DATA_TYPE_RESERVE, bcast_mac,
+                                                           (const uint8_t *)election_msg, strlen(election_msg));
+                    if(ret_e != ESP_OK) {
+                        ESP_LOGE(TAG, "Failed to broadcast election message, err: %s", esp_err_to_name(ret_e));
+                    }
+                } else {
+                    ESP_LOGW(TAG, "No nodes available for election");
                 }
-                // Assume that the selected node structure carries a unique node_id.
-                uint16_t next_leader = selected->node->node_id;
-                char election_msg[64];
-                snprintf(election_msg, sizeof(election_msg), "ELECTION:%hu", next_leader);
-                // Broadcast the nomination to the entire network.
-                uint8_t bcast_mac[ESP_NOW_ETH_ALEN] = {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF};
-                esp_err_t ret_e = espnow_send_wrapper(ESPNOW_DATA_TYPE_RESERVE, bcast_mac,
-                                                       (const uint8_t *)election_msg, strlen(election_msg));
-                if(ret_e != ESP_OK) {
-                    ESP_LOGE(TAG, "Failed to broadcast election message, err: %s", esp_err_to_name(ret_e));
-                }
-            } else {
-                ESP_LOGW(TAG, "No nodes available for election");
             }
         } 
         else 
         {
-            ESP_LOGI(TAG, "Not leader for Block %" PRIu32 ", waiting for leader broadcast", new_block.block_id);
-            // Non-leader: poll for election message from current leader.
-            if (waitForElectionMessage(&elected_leader, pdMS_TO_TICKS(10000))) {
-                ESP_LOGI(TAG, "Election message received: next leader = %hu", elected_leader);
-                if (elected_leader == get_my_node_id()) {
+            ESP_LOGI(TAG, "Not leader, waiting for election broadcast.");
+            if (waitForElectionMessage(elected_leader_mac, pdMS_TO_TICKS(10000))) {
+                ESP_LOGI(TAG, "Election message received: next leader MAC = " MACSTR, MAC2STR(elected_leader_mac));
+                if (memcmp(elected_leader_mac, my_mac, ESP_NOW_ETH_ALEN) == 0) {
                     ESP_LOGI(TAG, "I am elected as next leader. Preparing to lead next round.");
                     // (Optionally trigger leader initialization.)
                 } else {

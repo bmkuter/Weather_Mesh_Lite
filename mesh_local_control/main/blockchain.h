@@ -3,14 +3,15 @@
 
 #include <stdint.h>
 #include <stdbool.h>
+#include "esp_mesh_lite.h"
 
 #define MAX_NODES       3   // Maximum number of sensor records per block
-#define MAX_NEIGHBORS   5     // Maximum number of neighbor RSSI readings per sensor record
+#define MAX_NEIGHBORS   5   // Maximum number of neighbor RSSI readings per sensor record
 #define HEATMAP_SIZE    3   // Dummy size for heatmap data
 
 // Structure for a sensor record.
 typedef struct {
-    uint16_t node_id;      // Unique node ID (derived from MAC)
+    uint8_t mac[ESP_NOW_ETH_ALEN];  // Device MAC address
     uint32_t timestamp;    // Timestamp (in seconds)
     float temperature;     // Temperature in °C (e.g., 8.0)
     float humidity;        // Humidity in % (e.g., 60.0)
@@ -19,7 +20,6 @@ typedef struct {
 
 // Structure for a blockchain block.
 typedef struct {
-    uint32_t block_id;                    // Sequential block ID
     uint32_t timestamp;                   // Block creation time (in seconds)
     uint8_t prev_hash[32];                // Previous block hash (placeholder)
     sensor_record_t node_data[MAX_NODES]; // Array of sensor records (one per node)

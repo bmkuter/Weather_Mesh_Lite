@@ -40,10 +40,21 @@ void espnow_recv_cb(const uint8_t *mac_addr, const uint8_t *data, int len)
         }
     }
     else if (strncmp((const char *)data, "ELECTION:", 9) == 0) {
-         uint16_t next_leader = 0;
-         sscanf((const char *)data, "ELECTION:%hu", &next_leader);
-         election_response_push(mac_addr, next_leader);
-         ESP_LOGI(TAG, "Election message from " MACSTR ": next leader = %hu", MAC2STR(mac_addr), next_leader);
+        uint8_t leader_mac[ESP_NOW_ETH_ALEN] = {0};
+        int values[ESP_NOW_ETH_ALEN];
+        // Parse message formatted as "ELECTION:XX:XX:XX:XX:XX:XX"
+        if (sscanf((const char *)data, "ELECTION:%2x:%2x:%2x:%2x:%2x:%2x",
+                   &values[0], &values[1], &values[2],
+                   &values[3], &values[4], &values[5]) == ESP_NOW_ETH_ALEN) {
+            for (int i = 0; i < ESP_NOW_ETH_ALEN; i++) {
+                leader_mac[i] = (uint8_t)values[i];
+            }
+            election_response_push(mac_addr, leader_mac);
+            ESP_LOGI(TAG, "Election message from " MACSTR ": next leader MAC = " MACSTR,
+                     MAC2STR(mac_addr), MAC2STR(leader_mac));
+        } else {
+            ESP_LOGE(TAG, "Failed to parse election message from " MACSTR, MAC2STR(mac_addr));
+        }
     }
     else if (len == sizeof(block_t)) {
         // Received a block from the leader.
@@ -53,12 +64,11 @@ void espnow_recv_cb(const uint8_t *mac_addr, const uint8_t *data, int len)
         // Check for sensor data submission.
         if (strncmp((const char *)data, "SENSOR_DATA:", 12) == 0) {
             ESP_LOGI(TAG, "Received sensor data from " MACSTR ": %.*s", MAC2STR(mac_addr), len, data);
-            // Parse the sensor data.
             sensor_record_t sensorData = {0};
-            // Example expected format: "SENSOR_DATA:node_id:temperature:humidity:timestamp"
-            // You may need to adjust parsing based on the actual message format.
-            sscanf((const char *)data, "SENSOR_DATA:%hu:%f:%f:%lu",
-                   &sensorData.node_id,
+            // Set sender MAC in sensor record.
+            memcpy(sensorData.mac, mac_addr, ESP_NOW_ETH_ALEN);
+            // Example expected format now: "SENSOR_DATA:%f:%f:%lu"
+            sscanf((const char *)data, "SENSOR_DATA:%f:%f:%lu",
                    &sensorData.temperature,
                    &sensorData.humidity,
                    &sensorData.timestamp);
