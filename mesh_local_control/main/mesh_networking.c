@@ -18,7 +18,7 @@ void espnow_recv_cb(const uint8_t *mac_addr, const uint8_t *data, int len)
         float humidity = temperature_probe_read_humidity();
         uint32_t now = (uint32_t)time(NULL);
         char sensor_msg[128];
-        snprintf(sensor_msg, sizeof(sensor_msg), "SENSOR_DATA:%d:%.2f:%.2f:%lu", node_id, temp, humidity, now);
+        snprintf(sensor_msg, sizeof(sensor_msg), "SENSOR_DATA:%.2f:%.2f:%lu", temp, humidity, now);
         esp_err_t ret = espnow_send_wrapper(ESPNOW_DATA_TYPE_RESERVE, mac_addr,
                                             (const uint8_t *)sensor_msg, strlen(sensor_msg));
         if(ret != ESP_OK) {
@@ -68,7 +68,7 @@ void espnow_recv_cb(const uint8_t *mac_addr, const uint8_t *data, int len)
             // Set sender MAC in sensor record.
             memcpy(sensorData.mac, mac_addr, ESP_NOW_ETH_ALEN);
             // Example expected format now: "SENSOR_DATA:%f:%f:%lu"
-            sscanf((const char *)data, "SENSOR_DATA:%f:%f:%lu",
+            sscanf((const char *)data, "SENSOR_DATA:%f:%f:%" PRIu32,
                    &sensorData.temperature,
                    &sensorData.humidity,
                    &sensorData.timestamp);
