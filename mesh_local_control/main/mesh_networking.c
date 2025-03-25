@@ -56,27 +56,27 @@ void espnow_recv_cb(const uint8_t *mac_addr, const uint8_t *data, int len)
             ESP_LOGE(TAG, "Failed to parse election message from " MACSTR, MAC2STR(mac_addr));
         }
     }
-    else if (len == sizeof(block_t)) {
-        // Received a block from the leader.
-        blockchain_receive_block(data, len);
+    else if (strncmp((const char *)data, "NEW_BLOCK", sizeof("NEW_BLOCK")) == 0) {
+        ESP_LOGI(TAG, "Received new block from " MACSTR, MAC2STR(mac_addr));
+        blockchain_receive_block(data + sizeof("NEW_BLOCK"), sizeof(block_t));
     }
-    else {
+    else if (strncmp((const char *)data, "SENSOR_DATA:", 12) == 0){
         // Check for sensor data submission.
-        if (strncmp((const char *)data, "SENSOR_DATA:", 12) == 0) {
-            ESP_LOGI(TAG, "Received sensor data from " MACSTR ": %.*s", MAC2STR(mac_addr), len, data);
-            sensor_record_t sensorData = {0};
-            // Set sender MAC in sensor record.
-            memcpy(sensorData.mac, mac_addr, ESP_NOW_ETH_ALEN);
-            // Example expected format now: "SENSOR_DATA:%f:%f:%lu"
-            sscanf((const char *)data, "SENSOR_DATA:%f:%f:%" PRIu32,
-                   &sensorData.temperature,
-                   &sensorData.humidity,
-                   &sensorData.timestamp);
-            // Push the parsed data into the response queue.
-            node_response_push(mac_addr, &sensorData);
-        } else {
-            ESP_LOGI(TAG, "Received unknown message from " MACSTR ": %.*s", MAC2STR(mac_addr), len, data);
-        }
+        ESP_LOGI(TAG, "Received sensor data from " MACSTR ": %.*s", MAC2STR(mac_addr), len, data);
+        sensor_record_t sensorData = {0};
+        // Set sender MAC in sensor record.
+        memcpy(sensorData.mac, mac_addr, ESP_NOW_ETH_ALEN);
+        // Example expected format now: "SENSOR_DATA:%f:%f:%lu"
+        sscanf((const char *)data, "SENSOR_DATA:%f:%f:%" PRIu32,
+                &sensorData.temperature,
+                &sensorData.humidity,
+                &sensorData.timestamp);
+        // Push the parsed data into the response queue.
+        node_response_push(mac_addr, &sensorData);
+    } 
+    else 
+    {
+        ESP_LOGI(TAG, "Received unknown message from " MACSTR ": %.*s", MAC2STR(mac_addr), len, data);
     }
 }
 

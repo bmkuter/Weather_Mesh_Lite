@@ -60,7 +60,7 @@ void app_main()
 
     esp_mesh_lite_config_t mesh_lite_config = ESP_MESH_LITE_DEFAULT_INIT();
     mesh_lite_config.join_mesh_ignore_router_status = true;
-    // mesh_lite_config.join_mesh_without_configured_wifi = true;
+    mesh_lite_config.join_mesh_without_configured_wifi = true;
     esp_mesh_lite_init(&mesh_lite_config);
 
     app_wifi_set_softap_info();

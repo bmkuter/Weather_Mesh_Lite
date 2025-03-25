@@ -257,7 +257,18 @@ void sensor_blockchain_task(void *pvParameters)
                      my_sensor.temperature, my_sensor.humidity);
             blockchain_add_block(&new_block);
 
+            // Broadcast the new block to all nodes.
+            uint8_t bcast_mac[ESP_NOW_ETH_ALEN] = {0xFF,0xFF,0xFF,0xFF,0xFF,0xFF};
+            // Pack block payload in wrapper for children node to parse
+            char new_block_command[] = "NEW_BLOCK";
+            char new_block_str[sizeof(block_t) + sizeof(new_block_command)];
+            memcpy(new_block_str, &new_block_command, sizeof(new_block_command));
+            memcpy(new_block_str + sizeof(new_block_command), &new_block, sizeof(block_t));
+            esp_err_t ret = espnow_send_wrapper(ESPNOW_DATA_TYPE_RESERVE, bcast_mac,
+                                                (const uint8_t *)new_block_str, sizeof(new_block_str));
 
+            vTaskDelay(pdMS_TO_TICKS(500));
+            
             // Election process: current leader obtains the full list, randomly selects one node,
             // then broadcasts that node's MAC address as the next leader.
             node_count = 0;
