@@ -10,6 +10,7 @@
 #include "node_response.h"
 #include "election_response.h"
 #include "esp_mesh_lite.h"
+#include "mbedtls/sha256.h"
 
 #define BLOCKCHAIN_BUFFER_SIZE 16  // Maximum blocks stored locally
 
@@ -18,13 +19,41 @@ static block_t *blockchain_buffer = NULL;
 static size_t blockchain_size = 0;
 static SemaphoreHandle_t blockchain_mutex = NULL;
 
-// Add a helper function to compute a dummy merkle root.
-static void calculate_merkle_root(block_t *block) {
-    // Simple dummy hash: use XOR of block_id and timestamp for every byte.
-    uint8_t hash = (uint8_t)(block->timestamp & 0xFF);
-    for (int i = 0; i < sizeof(block->merkle_root); i++) {
-        block->merkle_root[i] = hash;
+/**
+ * Compute the SHA‑256 hash for the given block.
+ * (Temporarily zero out the hash field so it is not included in the hash calculation).
+ */
+static void calculate_block_hash(block_t *block) {
+    // Serialize block fields except for hash.
+    size_t ser_size = sizeof(block->timestamp) + sizeof(block->prev_hash) +
+                      sizeof(block->pop_proof) + sizeof(block->node_data) +
+                      sizeof(block->heatmap);
+    uint8_t serial_buffer[ser_size];
+    size_t offset = 0;
+    memcpy(serial_buffer + offset, &block->timestamp, sizeof(block->timestamp)); offset += sizeof(block->timestamp);
+    memcpy(serial_buffer + offset, block->prev_hash, sizeof(block->prev_hash)); offset += sizeof(block->prev_hash);
+    memcpy(serial_buffer + offset, block->pop_proof, sizeof(block->pop_proof)); offset += sizeof(block->pop_proof);
+    memcpy(serial_buffer + offset, block->node_data, sizeof(block->node_data)); offset += sizeof(block->node_data);
+    memcpy(serial_buffer + offset, block->heatmap, sizeof(block->heatmap));
+    
+    ESP_LOGI(TAG, "Block serialized for hash calculation");
+    ESP_LOGI(TAG, "Serial Buffer: %.*s", ser_size, serial_buffer);
+
+    uint8_t computed_hash[32] = {0};
+    mbedtls_sha256_context ctx;
+    mbedtls_sha256_init(&ctx);
+    if (mbedtls_sha256_starts(&ctx, 0) != 0) {
+        ESP_LOGE(TAG, "SHA256 starts failed");
+        mbedtls_sha256_free(&ctx);
+        return;
     }
+    // Hash the serialized data.
+    mbedtls_sha256_update(&ctx, serial_buffer, ser_size);
+    mbedtls_sha256_finish(&ctx, computed_hash);
+    mbedtls_sha256_free(&ctx);
+    // Store computed hash back into block->hash.
+    memcpy(block->hash, computed_hash, 32);
+    ESP_LOGI(TAG, "Block hash computed");
 }
 
 uint32_t blockchain_init(void)
@@ -70,26 +99,58 @@ bool blockchain_get_last_block(block_t *block_out)
     return result;
 }
 
+/**
+ * Print the last block.
+ */
 void blockchain_print_last_block(void)
 {
     block_t last;
     if (blockchain_get_last_block(&last)) {
         ESP_LOGI(TAG, "----- Latest Block -----");
         ESP_LOGI(TAG, "Timestamp: 0x%" PRIx32, last.timestamp);
-        ESP_LOGI(TAG, "Merkle Root: " MACSTR, last.merkle_root[0], last.merkle_root[1],
-                 last.merkle_root[2], last.merkle_root[3], last.merkle_root[4], last.merkle_root[5]);
+        ESP_LOGI(TAG, "Block Hash: ");
+        ESP_LOG_BUFFER_HEX_LEVEL(TAG, last.hash, 32, ESP_LOG_INFO);
+        ESP_LOGI(TAG, "Prev Hash: ");
+        ESP_LOG_BUFFER_HEX_LEVEL(TAG, last.prev_hash, 32, ESP_LOG_INFO);
         ESP_LOGI(TAG, "PoP Proof: %s", last.pop_proof);
         for (int i = 0; i < MAX_NODES; i++) {
             sensor_record_t *record = &last.node_data[i];
-            // Print sensor data if MAC is not all zeros.
             if (record->mac[0] != 0) {
-                ESP_LOGI(TAG, "Sensor " MACSTR ": Temp: %.2f°C, Humidity: %.2f%%",
+                ESP_LOGI(TAG, "  Sensor " MACSTR ": Temp: %.2f°C, Humidity: %.2f%%",
                          MAC2STR(record->mac), record->temperature, record->humidity);
             }
         }
         ESP_LOGI(TAG, "------------------------");
     } else {
         ESP_LOGI(TAG, "No block available");
+    }
+}
+
+/**
+ * Print the entire blockchain history.
+ */
+void blockchain_print_history(void)
+{
+    if (xSemaphoreTake(blockchain_mutex, portMAX_DELAY)) {
+        ESP_LOGI(TAG, "===== Blockchain History =====");
+        for (size_t i = 0; i < blockchain_size; i++) {
+            block_t *current = &blockchain_buffer[i];
+            ESP_LOGI(TAG, "Block Hash:");
+            ESP_LOG_BUFFER_HEX_LEVEL(TAG, current->hash, 32, ESP_LOG_INFO);
+            ESP_LOGI(TAG, "Prev Hash:");
+            ESP_LOG_BUFFER_HEX_LEVEL(TAG, current->prev_hash, 32, ESP_LOG_INFO);
+            ESP_LOGI(TAG, "Timestamp: 0x%" PRIx32, current->timestamp);
+            ESP_LOGI(TAG, "PoP Proof: %s", current->pop_proof);
+            for (int j = 0; j < MAX_NODES; j++) {
+                sensor_record_t *record = &current->node_data[j];
+                if (record->mac[0] != 0) {
+                    ESP_LOGI(TAG, "  Sensor " MACSTR ": Temp: %.2f°C, Humidity: %.2f%%",
+                             MAC2STR(record->mac), record->temperature, record->humidity);
+                }
+            }
+        }
+        ESP_LOGI(TAG, "===============================");
+        xSemaphoreGive(blockchain_mutex);
     }
 }
 
@@ -101,7 +162,7 @@ void blockchain_create_block(block_t *new_block, sensor_record_t sensor_data[MAX
 
     block_t last;
     if (blockchain_get_last_block(&last)) {
-        memcpy(new_block->prev_hash, last.merkle_root, sizeof(last.merkle_root));
+        memcpy(new_block->prev_hash, last.hash, sizeof(last.hash));
     } else {
         memset(new_block->prev_hash, 0, sizeof(new_block->prev_hash));
     }
@@ -113,8 +174,6 @@ void blockchain_create_block(block_t *new_block, sensor_record_t sensor_data[MAX
     for (int i = 0; i < HEATMAP_SIZE; i++) {
         new_block->heatmap[i] = i;
     }
-    // Removed dummy merkle_root assignment.
-    // The pop_proof field will be set later by consensus_generate_pop_proof().
 }
 
 void blockchain_receive_block(const uint8_t *data, uint16_t len)
@@ -129,30 +188,6 @@ void blockchain_receive_block(const uint8_t *data, uint16_t len)
         ESP_LOGI(TAG, "Block with Timestamp 0x%" PRIx32 " received and added", incoming_block.timestamp);
     } else {
         ESP_LOGE(TAG, "Failed to add received block (Timestamp 0x%" PRIx32 ")", incoming_block.timestamp);
-    }
-}
-
-// New function: print entire blockchain history.
-void blockchain_print_history(void)
-{
-    if (xSemaphoreTake(blockchain_mutex, portMAX_DELAY)) {
-        ESP_LOGI(TAG, "===== Blockchain History =====");
-        for (size_t i = 0; i < blockchain_size; i++) {
-            block_t *current = &blockchain_buffer[i];
-            ESP_LOGI(TAG, "Block %d: Timestamp=0x%" PRIx32, i, current->timestamp);
-            ESP_LOGI(TAG, "Merkle Root: " MACSTR, current->merkle_root[0], current->merkle_root[1],
-                     current->merkle_root[2], current->merkle_root[3], current->merkle_root[4], current->merkle_root[5]);
-            ESP_LOGI(TAG, "PoP Proof: %s", current->pop_proof);
-            for (int j = 0; j < MAX_NODES; j++) {
-                sensor_record_t *record = &current->node_data[j];
-                if (record->mac[0] != 0) {
-                    ESP_LOGI(TAG, "  Sensor " MACSTR ": Temp: %.2f°C, Humidity: %.2f%%",
-                             MAC2STR(record->mac), record->temperature, record->humidity);
-                }
-            }
-        }
-        ESP_LOGI(TAG, "===============================");
-        xSemaphoreGive(blockchain_mutex);
     }
 }
 
@@ -220,8 +255,6 @@ void sensor_blockchain_task(void *pvParameters)
             // Ensure fresh timestamp.
             new_block.timestamp = (uint32_t)time(NULL);
             // Calculate new hash for the block.
-            // (The leader will include its own sensor data along with others if available.)
-            calculate_merkle_root(&new_block);
             // Generate Proof-of-participation.
             consensus_generate_pop_proof(&new_block, my_mac);
 
@@ -255,6 +288,13 @@ void sensor_blockchain_task(void *pvParameters)
             ESP_LOGI(TAG, "All sensor responses processed");
             ESP_LOGW(TAG, "Block Data: Temp: %.2f°C, Humidity: %.2f%%",
                      my_sensor.temperature, my_sensor.humidity);
+            // Now compute the hash for the new block.
+            calculate_block_hash(&new_block);
+            ESP_LOGI(TAG, "Block Hash: ");
+            ESP_LOG_BUFFER_HEX_LEVEL(TAG, new_block.hash, 32, ESP_LOG_INFO);
+            ESP_LOGI(TAG, "Prev Hash: ");
+            ESP_LOG_BUFFER_HEX_LEVEL(TAG, new_block.prev_hash, 32, ESP_LOG_INFO);
+            // Add block to blockchain.
             blockchain_add_block(&new_block);
 
             // Broadcast the new block to all nodes.

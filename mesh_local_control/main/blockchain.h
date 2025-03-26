@@ -21,10 +21,10 @@ typedef struct {
 // Structure for a blockchain block.
 typedef struct {
     uint32_t timestamp;                   // Block creation time (in seconds)
-    uint8_t prev_hash[32];                // Previous block hash (placeholder)
-    sensor_record_t node_data[MAX_NODES]; // Array of sensor records (one per node)
+    uint8_t prev_hash[32];                // Previous block hash
+    sensor_record_t node_data[MAX_NODES]; // Sensor records (one per node)
     uint8_t heatmap[HEATMAP_SIZE];        // Dummy heatmap data
-    uint8_t merkle_root[32];              // Dummy Merkle root (for future use)
+    uint8_t hash[32];                     // Block’s hash (computed from contents)
     char pop_proof[64];                   // Proof-of-Participation string
 } block_t;
 
