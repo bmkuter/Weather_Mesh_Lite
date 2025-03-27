@@ -108,10 +108,10 @@ void blockchain_print_last_block(void)
     if (blockchain_get_last_block(&last)) {
         ESP_LOGI(TAG, "----- Latest Block -----");
         ESP_LOGI(TAG, "Timestamp: 0x%" PRIx32, last.timestamp);
-        ESP_LOGI(TAG, "Block Hash: ");
-        ESP_LOG_BUFFER_HEX_LEVEL(TAG, last.hash, 32, ESP_LOG_INFO);
         ESP_LOGI(TAG, "Prev Hash: ");
         ESP_LOG_BUFFER_HEX_LEVEL(TAG, last.prev_hash, 32, ESP_LOG_INFO);
+        ESP_LOGI(TAG, "Block Hash: ");
+        ESP_LOG_BUFFER_HEX_LEVEL(TAG, last.hash, 32, ESP_LOG_INFO);
         ESP_LOGI(TAG, "PoP Proof: %s", last.pop_proof);
         for (int i = 0; i < MAX_NODES; i++) {
             sensor_record_t *record = &last.node_data[i];
@@ -135,10 +135,10 @@ void blockchain_print_history(void)
         ESP_LOGI(TAG, "===== Blockchain History =====");
         for (size_t i = 0; i < blockchain_size; i++) {
             block_t *current = &blockchain_buffer[i];
-            ESP_LOGI(TAG, "Block Hash:");
-            ESP_LOG_BUFFER_HEX_LEVEL(TAG, current->hash, 32, ESP_LOG_INFO);
             ESP_LOGI(TAG, "Prev Hash:");
             ESP_LOG_BUFFER_HEX_LEVEL(TAG, current->prev_hash, 32, ESP_LOG_INFO);
+            ESP_LOGI(TAG, "Block Hash:");
+            ESP_LOG_BUFFER_HEX_LEVEL(TAG, current->hash, 32, ESP_LOG_INFO);
             ESP_LOGI(TAG, "Timestamp: 0x%" PRIx32, current->timestamp);
             ESP_LOGI(TAG, "PoP Proof: %s", current->pop_proof);
             for (int j = 0; j < MAX_NODES; j++) {
@@ -290,10 +290,10 @@ void sensor_blockchain_task(void *pvParameters)
                      my_sensor.temperature, my_sensor.humidity);
             // Now compute the hash for the new block.
             calculate_block_hash(&new_block);
-            ESP_LOGI(TAG, "Block Hash: ");
-            ESP_LOG_BUFFER_HEX_LEVEL(TAG, new_block.hash, 32, ESP_LOG_INFO);
             ESP_LOGI(TAG, "Prev Hash: ");
             ESP_LOG_BUFFER_HEX_LEVEL(TAG, new_block.prev_hash, 32, ESP_LOG_INFO);
+            ESP_LOGI(TAG, "Block Hash: ");
+            ESP_LOG_BUFFER_HEX_LEVEL(TAG, new_block.hash, 32, ESP_LOG_INFO);
             // Add block to blockchain.
             blockchain_add_block(&new_block);
 

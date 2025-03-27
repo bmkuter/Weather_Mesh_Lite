@@ -57,7 +57,15 @@ void espnow_recv_cb(const uint8_t *mac_addr, const uint8_t *data, int len)
         }
     }
     else if (strncmp((const char *)data, "NEW_BLOCK", sizeof("NEW_BLOCK")) == 0) {
+        block_t * temp_block_ptr = (block_t *) data + sizeof("NEW_BLOCK");
         ESP_LOGI(TAG, "Received new block from " MACSTR, MAC2STR(mac_addr));
+        // Print each member of the incoming block_t type.
+        ESP_LOGI(TAG, "Block timestamp: %" PRIu32, ((block_t *)temp_block_ptr)->timestamp);
+        ESP_LOGI(TAG, "Prev Hash: ");
+        ESP_LOG_BUFFER_HEX_LEVEL(TAG, temp_block_ptr->prev_hash, 32, ESP_LOG_INFO);
+        ESP_LOGI(TAG, "Block Hash: ");
+        ESP_LOG_BUFFER_HEX_LEVEL(TAG, temp_block_ptr->hash, 32, ESP_LOG_INFO);
+        ESP_LOGI(TAG, "Block PoP proof: %.*s", 64, ((block_t *)temp_block_ptr)->pop_proof);
         blockchain_receive_block(data + sizeof("NEW_BLOCK"), sizeof(block_t));
     }
     else if (strncmp((const char *)data, "SENSOR_DATA:", 12) == 0){
