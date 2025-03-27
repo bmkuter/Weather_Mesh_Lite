@@ -174,7 +174,7 @@ void blockchain_create_block(block_t *new_block, sensor_record_t sensor_data[MAX
     for (int i = 0; i < HEATMAP_SIZE; i++) {
         new_block->heatmap[i] = i;
     }
-}
+} 
 
 void blockchain_receive_block(const uint8_t *data, uint16_t len)
 {
