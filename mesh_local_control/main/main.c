@@ -12,6 +12,7 @@
 #include "esp_log.h"
 #include "node_response.h"
 #include "election_response.h"
+#include "external_comm.h"
 
 #define PAYLOAD_LEN       (1456) /**< Max payload size(in bytes) */
 #define UART_PORT_NUM       UART_NUM_1
@@ -66,6 +67,10 @@ void app_main()
     app_wifi_set_softap_info();
 
     esp_mesh_lite_start();
+
+    /* Initialize and start external MQTT interface */
+    external_comm_init();
+    external_comm_start();
 
     /**
      * @breif Create handler
