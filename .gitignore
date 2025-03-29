@@ -6,3 +6,5 @@ mesh_local_control/build/
 mesh_local_control/managed_components/
 
 mesh_local_control/main/Kconfig.projbuild
+
+mesh_local_control/main/secrets.h

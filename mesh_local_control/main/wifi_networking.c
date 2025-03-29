@@ -1,4 +1,5 @@
 #include "wifi_networking.h"
+#include "secrets.h"
 
 static const char *TAG = "wifi_networking";
 static int g_sockfd    = -1;
@@ -97,12 +98,13 @@ void tcp_client_write_task(void *arg)
 void ip_event_sta_got_ip_handler(void *arg, esp_event_base_t event_base,
     int32_t event_id, void *event_data)
 {
-// static bool tcp_task = false;
+    ESP_LOGE(TAG, "Sta got ip event");
+    static bool tcp_task = false;
 
-// if (!tcp_task) {
-//     xTaskCreate(tcp_client_write_task, "tcp_client_write_task", 4 * 1024, NULL, 5, NULL);
-//     tcp_task = true;
-// }
+    if (!tcp_task) {
+        xTaskCreate(tcp_client_write_task, "tcp_client_write_task", 4 * 1024, NULL, 5, NULL);
+        tcp_task = true;
+    }
 }
 
 void wifi_init(void)
@@ -110,8 +112,8 @@ void wifi_init(void)
     // Station
     wifi_config_t wifi_config = {
         .sta = {
-            .ssid = CONFIG_ROUTER_SSID,
-            .password = CONFIG_ROUTER_PASSWORD,
+            .ssid = SECRET_SSID,
+            .password = SECRET_PASSWORD,
         },
     };
     wifi_config.sta.failure_retry_cnt = 2;

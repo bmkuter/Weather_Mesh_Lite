@@ -30,6 +30,7 @@ typedef struct {
 
 // Public blockchain API.
 uint32_t blockchain_init(void);
+void blockchain_deinit(void);
 void blockchain_create_block(block_t *new_block, sensor_record_t sensor_data[MAX_NODES]);
 bool blockchain_add_block(block_t *new_block);
 bool blockchain_get_last_block(block_t *block_out);

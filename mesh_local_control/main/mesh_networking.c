@@ -68,7 +68,7 @@ void espnow_recv_cb(const uint8_t *mac_addr, const uint8_t *data, int len)
         ESP_LOGI(TAG, "Block PoP proof: %.*s", 64, ((block_t *)temp_block_ptr)->pop_proof);
         blockchain_receive_block(data + sizeof("NEW_BLOCK"), sizeof(block_t));
     }
-    else if (strncmp((const char *)data, "SENSOR_DATA:", 12) == 0){
+    else if (strncmp((const char *)data, "SENSOR_DATA:", sizeof("SENSOR_DATA:")) == 0){
         // Check for sensor data submission.
         ESP_LOGI(TAG, "Received sensor data from " MACSTR ": %.*s", MAC2STR(mac_addr), len, data);
         sensor_record_t sensorData = {0};
@@ -82,6 +82,12 @@ void espnow_recv_cb(const uint8_t *mac_addr, const uint8_t *data, int len)
         // Push the parsed data into the response queue.
         node_response_push(mac_addr, &sensorData);
     } 
+    else if (strncmp((const char *)data, "RESET_BLOCKCHAIN", sizeof("RESET_BLOCKCHAIN")))
+    {
+        // Reset the local blockchain (and trigger a new election as needed).
+        blockchain_deinit();
+        blockchain_init();
+    }
     else 
     {
         ESP_LOGI(TAG, "Received unknown message from " MACSTR ": %.*s", MAC2STR(mac_addr), len, data);

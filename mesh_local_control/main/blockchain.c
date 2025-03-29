@@ -37,7 +37,8 @@ static void calculate_block_hash(block_t *block) {
     memcpy(serial_buffer + offset, block->heatmap, sizeof(block->heatmap));
     
     ESP_LOGI(TAG, "Block serialized for hash calculation");
-    ESP_LOGI(TAG, "Serial Buffer: %.*s", ser_size, serial_buffer);
+    ESP_LOGI(TAG, "Serial Buffer: 0x%x", serial_buffer[0]);
+    ESP_LOG_BUFFER_HEX_LEVEL(TAG, serial_buffer, ser_size, ESP_LOG_INFO);
 
     uint8_t computed_hash[32] = {0};
     mbedtls_sha256_context ctx;
@@ -68,6 +69,20 @@ uint32_t blockchain_init(void)
     ESP_LOGI(TAG, "Blockchain initialized");
 
     return 0;
+}
+
+void blockchain_deinit(void)
+{
+    if (blockchain_buffer) {
+        free(blockchain_buffer);
+        blockchain_buffer = NULL;
+    }
+    if (blockchain_mutex) {
+        vSemaphoreDelete(blockchain_mutex);
+        blockchain_mutex = NULL;
+    }
+    blockchain_size = 0;
+    ESP_LOGI(TAG, "Blockchain deinitialized");
 }
 
 bool blockchain_add_block(block_t *new_block)
@@ -411,7 +426,7 @@ void sensor_blockchain_task(void *pvParameters)
                 }
             }
         }
-        blockchain_print_history();
+        // blockchain_print_history();
 
         // Wait for 60 seconds before generating the next block.
         vTaskDelay(pdMS_TO_TICKS(60000));
