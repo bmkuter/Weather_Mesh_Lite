@@ -24,37 +24,113 @@ static SemaphoreHandle_t blockchain_mutex = NULL;
  * (Temporarily zero out the hash field so it is not included in the hash calculation).
  */
 static void calculate_block_hash(block_t *block) {
-    // Serialize block fields except for hash.
-    size_t ser_size = sizeof(block->timestamp) + sizeof(block->prev_hash) +
-                      sizeof(block->pop_proof) + sizeof(block->node_data) +
-                      sizeof(block->heatmap);
-    uint8_t serial_buffer[ser_size];
-    size_t offset = 0;
-    memcpy(serial_buffer + offset, &block->timestamp, sizeof(block->timestamp)); offset += sizeof(block->timestamp);
-    memcpy(serial_buffer + offset, block->prev_hash, sizeof(block->prev_hash)); offset += sizeof(block->prev_hash);
-    memcpy(serial_buffer + offset, block->pop_proof, sizeof(block->pop_proof)); offset += sizeof(block->pop_proof);
-    memcpy(serial_buffer + offset, block->node_data, sizeof(block->node_data)); offset += sizeof(block->node_data);
-    memcpy(serial_buffer + offset, block->heatmap, sizeof(block->heatmap));
+    // Fixed fields: timestamp, prev_hash, pop_proof, heatmap, and num_sensor_readings.
+    size_t fixed_size = sizeof(block->timestamp) + sizeof(block->prev_hash) +
+                        sizeof(block->pop_proof) + sizeof(block->heatmap) +
+                        sizeof(block->num_sensor_readings);
+    // Total size = fixed fields + all sensor records.
+    size_t total_size = fixed_size + (block->num_sensor_readings * sensor_size);
     
-    ESP_LOGI(TAG, "Block serialized for hash calculation");
-    ESP_LOGI(TAG, "Serial Buffer: 0x%x", serial_buffer[0]);
-    ESP_LOG_BUFFER_HEX_LEVEL(TAG, serial_buffer, ser_size, ESP_LOG_INFO);
+    uint8_t *serial_buffer = malloc(total_size);
+    if (!serial_buffer) {
+        ESP_LOGE(TAG, "Failed to allocate serial buffer");
+        return;
+    }
+    size_t offset = 0;
+    
+    memcpy(serial_buffer + offset, &block->timestamp, sizeof(block->timestamp));
+    offset += sizeof(block->timestamp);
+    memcpy(serial_buffer + offset, block->prev_hash, sizeof(block->prev_hash));
+    offset += sizeof(block->prev_hash);
+    memcpy(serial_buffer + offset, block->pop_proof, sizeof(block->pop_proof));
+    offset += sizeof(block->pop_proof);
+    memcpy(serial_buffer + offset, block->heatmap, sizeof(block->heatmap));
+    offset += sizeof(block->heatmap);
+    memcpy(serial_buffer + offset, &block->num_sensor_readings, sizeof(block->num_sensor_readings));
+    offset += sizeof(block->num_sensor_readings);
+    
+    // Serialize each sensor record from the linked list.
+    sensor_record_t *cur = block->node_data;
+    while (cur) {
+        memcpy(serial_buffer + offset, cur->mac, sizeof(cur->mac));
+        offset += sizeof(cur->mac);
+        memcpy(serial_buffer + offset, &cur->timestamp, sizeof(cur->timestamp));
+        offset += sizeof(cur->timestamp);
+        memcpy(serial_buffer + offset, &cur->temperature, sizeof(cur->temperature));
+        offset += sizeof(cur->temperature);
+        memcpy(serial_buffer + offset, &cur->humidity, sizeof(cur->humidity));
+        offset += sizeof(cur->humidity);
+        memcpy(serial_buffer + offset, cur->rssi, MAX_NEIGHBORS*sizeof(int8_t));
+        offset += MAX_NEIGHBORS*sizeof(int8_t);
+        
+        cur = cur->next;
+    }
+    
+    ESP_LOGI(TAG, "Block serialized for hash calculation, total bytes: %d", total_size);
+    ESP_LOG_BUFFER_HEX_LEVEL(TAG, serial_buffer, total_size, ESP_LOG_INFO);
 
     uint8_t computed_hash[32] = {0};
     mbedtls_sha256_context ctx;
     mbedtls_sha256_init(&ctx);
     if (mbedtls_sha256_starts(&ctx, 0) != 0) {
         ESP_LOGE(TAG, "SHA256 starts failed");
+        free(serial_buffer);
         mbedtls_sha256_free(&ctx);
         return;
     }
-    // Hash the serialized data.
-    mbedtls_sha256_update(&ctx, serial_buffer, ser_size);
+    mbedtls_sha256_update(&ctx, serial_buffer, total_size);
     mbedtls_sha256_finish(&ctx, computed_hash);
     mbedtls_sha256_free(&ctx);
-    // Store computed hash back into block->hash.
+    
+    free(serial_buffer);
     memcpy(block->hash, computed_hash, 32);
     ESP_LOGI(TAG, "Block hash computed");
+}
+
+size_t blockchain_serialize_block(const block_t *block, uint8_t **out_buffer) {
+    // Fixed header size.
+    size_t header_size = sizeof(block->timestamp) + sizeof(block->prev_hash) +
+                         sizeof(block->pop_proof) + sizeof(block->heatmap) +
+                         sizeof(block->num_sensor_readings);
+    // Calculate dynamic sensor portion size.
+    size_t sensors_size = block->num_sensor_readings * sensor_size;
+    size_t total_size = header_size + sensors_size;
+    
+    uint8_t *buffer = malloc(total_size);
+    if (!buffer) {
+        ESP_LOGE(TAG, "Failed to allocate serialization buffer");
+        return 0;
+    }
+    size_t offset = 0;
+    // Serialize header.
+    memcpy(buffer + offset, &block->timestamp, sizeof(block->timestamp));
+    offset += sizeof(block->timestamp);
+    memcpy(buffer + offset, block->prev_hash, sizeof(block->prev_hash));
+    offset += sizeof(block->prev_hash);
+    memcpy(buffer + offset, block->pop_proof, sizeof(block->pop_proof));
+    offset += sizeof(block->pop_proof);
+    memcpy(buffer + offset, block->heatmap, sizeof(block->heatmap));
+    offset += sizeof(block->heatmap);
+    memcpy(buffer + offset, &block->num_sensor_readings, sizeof(block->num_sensor_readings));
+    offset += sizeof(block->num_sensor_readings);
+    
+    // Serialize each sensor record in order.
+    sensor_record_t *cur = block->node_data;
+    while (cur) {
+        memcpy(buffer + offset, cur->mac, sizeof(cur->mac));
+        offset += sizeof(cur->mac);
+        memcpy(buffer + offset, &cur->timestamp, sizeof(cur->timestamp));
+        offset += sizeof(cur->timestamp);
+        memcpy(buffer + offset, &cur->temperature, sizeof(cur->temperature));
+        offset += sizeof(cur->temperature);
+        memcpy(buffer + offset, &cur->humidity, sizeof(cur->humidity));
+        offset += sizeof(cur->humidity);
+        memcpy(buffer + offset, cur->rssi, MAX_NEIGHBORS * sizeof(int8_t));
+        offset += MAX_NEIGHBORS * sizeof(int8_t);
+        cur = cur->next;
+    }
+    *out_buffer = buffer;
+    return total_size;
 }
 
 uint32_t blockchain_init(void)
@@ -150,18 +226,19 @@ void blockchain_print_history(void)
         ESP_LOGI(TAG, "===== Blockchain History =====");
         for (size_t i = 0; i < blockchain_size; i++) {
             block_t *current = &blockchain_buffer[i];
-            ESP_LOGI(TAG, "Prev Hash:");
+            ESP_LOGI(TAG, "Block %d:", i);
+            ESP_LOGI(TAG, "  Prev Hash:");
             ESP_LOG_BUFFER_HEX_LEVEL(TAG, current->prev_hash, 32, ESP_LOG_INFO);
-            ESP_LOGI(TAG, "Block Hash:");
+            ESP_LOGI(TAG, "  Block Hash:");
             ESP_LOG_BUFFER_HEX_LEVEL(TAG, current->hash, 32, ESP_LOG_INFO);
-            ESP_LOGI(TAG, "Timestamp: 0x%" PRIx32, current->timestamp);
-            ESP_LOGI(TAG, "PoP Proof: %s", current->pop_proof);
-            for (int j = 0; j < MAX_NODES; j++) {
-                sensor_record_t *record = &current->node_data[j];
-                if (record->mac[0] != 0) {
-                    ESP_LOGI(TAG, "  Sensor " MACSTR ": Temp: %.2f°C, Humidity: %.2f%%",
-                             MAC2STR(record->mac), record->temperature, record->humidity);
-                }
+            ESP_LOGI(TAG, "  Timestamp: 0x%" PRIx32, current->timestamp);
+            ESP_LOGI(TAG, "  PoP Proof: %s", current->pop_proof);
+            ESP_LOGI(TAG, "  Sensor Readings (Total: %" PRIu32 "):", current->num_sensor_readings);
+            sensor_record_t *record = current->node_data;
+            while (record) {
+                ESP_LOGI(TAG, "    Sensor " MACSTR ": Temp: %.2f°C, Humidity: %.2f%%",
+                         MAC2STR(record->mac), record->temperature, record->humidity);
+                record = record->next;
             }
         }
         ESP_LOGI(TAG, "===============================");
@@ -204,6 +281,33 @@ void blockchain_receive_block(const uint8_t *data, uint16_t len)
     } else {
         ESP_LOGE(TAG, "Failed to add received block (Timestamp 0x%" PRIx32 ")", incoming_block.timestamp);
     }
+}
+
+/**
+ * Append a sensor record to the block's linked list.
+ */
+static void blockchain_append_sensor(block_t *block, const sensor_record_t *record)
+{
+    sensor_record_t *new_record = malloc(sizeof(sensor_record_t));
+    if (!new_record) {
+        ESP_LOGE(TAG, "No memory to allocate sensor record");
+        return;
+    }
+    memcpy(new_record, record, sizeof(sensor_record_t));
+    new_record->next = NULL;
+
+    if (block->node_data == NULL) {
+        block->node_data = new_record;
+    } else {
+        sensor_record_t *cur = block->node_data;
+        while (cur->next) {
+            cur = cur->next;
+        }
+        cur->next = new_record;
+    }
+    block->num_sensor_readings++;
+    ESP_LOGI(TAG, "Added sensor reading: Temp: %.2f, Humidity: %.2f (total: %" PRIu32 ")",
+             record->temperature, record->humidity, block->num_sensor_readings);
 }
 
 // In sensor_blockchain_task: update timestamp and calculate hash before Proof-of-participation.
@@ -254,25 +358,31 @@ void sensor_blockchain_task(void *pvParameters)
             const char *pulse_msg = "PULSE";
             uint32_t node_count = 0;
             const node_info_list_t *list = esp_mesh_lite_get_nodes_list(&node_count);
-            int sensor_index = 1; // leader's sensor data is in new_block.node_data[0]
 
-            // Get the current sensor reading for the leader itself.
+            // Prepare new block: zero out and set basic fields.
+            block_t new_block;
+            memset(&new_block, 0, sizeof(block_t));
+            new_block.timestamp = (uint32_t)time(NULL);
+            block_t last;
+            if (blockchain_get_last_block(&last)) {
+                memcpy(new_block.prev_hash, last.hash, sizeof(last.hash));
+            } else {
+                memset(new_block.prev_hash, 0, sizeof(new_block.prev_hash));
+            }
+            // Initialize the linked list head to NULL and sensor count to 0.
+            new_block.node_data = NULL;
+            new_block.num_sensor_readings = 0;
+            
+            // Append leader's own sensor reading.
             sensor_record_t my_sensor = {0};
             memcpy(my_sensor.mac, my_mac, ESP_NOW_ETH_ALEN);
             my_sensor.timestamp = (uint32_t)time(NULL);
             my_sensor.temperature = temperature_probe_read_temperature();
             my_sensor.humidity = temperature_probe_read_humidity();
-            sensor_record_t sensor_data[MAX_NODES] = {0};
-            sensor_data[0] = my_sensor;
+            my_sensor.next = NULL;
+            blockchain_append_sensor(&new_block, &my_sensor); // now count = 1
 
-            block_t new_block;
-            blockchain_create_block(&new_block, sensor_data);
-            // Ensure fresh timestamp.
-            new_block.timestamp = (uint32_t)time(NULL);
-            // Calculate new hash for the block.
-            // Generate Proof-of-participation.
-            consensus_generate_pop_proof(&new_block, my_mac);
-
+            // For each node (excluding leader), send a pulse and wait for response.
             while (list) {
                 ESP_LOGI(TAG, "Sending pulse to " MACSTR, MAC2STR(list->node->mac_addr));
                 esp_err_t ret = espnow_send_wrapper(ESPNOW_DATA_TYPE_RESERVE, list->node->mac_addr,
@@ -281,30 +391,22 @@ void sensor_blockchain_task(void *pvParameters)
                     ESP_LOGE(TAG, "Failed to send pulse to " MACSTR, MAC2STR(list->node->mac_addr));
                 }
                 sensor_record_t response = {0};
-                if (waitForNodeResponse(list->node->mac_addr, &response, pdMS_TO_TICKS(5000))) 
-                {
+                if (waitForNodeResponse(list->node->mac_addr, &response, pdMS_TO_TICKS(5000))) {
                     ESP_LOGI(TAG, "Received sensor data from " MACSTR ": Temp: %.2f°C, Humidity: %.2f%%",
                              MAC2STR(list->node->mac_addr), response.temperature, response.humidity);
-                    if (sensor_index < MAX_NODES) {
-                        new_block.node_data[sensor_index] = response;
-                        sensor_index++;
-                    } 
-                    else 
-                    {
-                        ESP_LOGW(TAG, "Max node data reached, ignoring response from " MACSTR, MAC2STR(list->node->mac_addr));
-                    }
-                } 
-                else 
-                {
+                    blockchain_append_sensor(&new_block, &response);
+                }
+                else {
                     ESP_LOGE(TAG, "No response from " MACSTR, MAC2STR(list->node->mac_addr));
                 }
                 list = list->next;
             }
             ESP_LOGI(TAG, "All sensor responses processed");
-            ESP_LOGW(TAG, "Block Data: Temp: %.2f°C, Humidity: %.2f%%",
-                     my_sensor.temperature, my_sensor.humidity);
-            // Now compute the hash for the new block.
+            
+            // Calculate new block hash and continue as before...
             calculate_block_hash(&new_block);
+            // Generate Proof-of-participation.
+            consensus_generate_pop_proof(&new_block, my_mac);
             ESP_LOGI(TAG, "Prev Hash: ");
             ESP_LOG_BUFFER_HEX_LEVEL(TAG, new_block.prev_hash, 32, ESP_LOG_INFO);
             ESP_LOGI(TAG, "Block Hash: ");
@@ -314,13 +416,32 @@ void sensor_blockchain_task(void *pvParameters)
 
             // Broadcast the new block to all nodes.
             uint8_t bcast_mac[ESP_NOW_ETH_ALEN] = {0xFF,0xFF,0xFF,0xFF,0xFF,0xFF};
-            // Pack block payload in wrapper for children node to parse
+            // Pack block payload with a command prefix.
             char new_block_command[] = "NEW_BLOCK";
-            char new_block_str[sizeof(block_t) + sizeof(new_block_command)];
-            memcpy(new_block_str, &new_block_command, sizeof(new_block_command));
-            memcpy(new_block_str + sizeof(new_block_command), &new_block, sizeof(block_t));
-            esp_err_t ret = espnow_send_wrapper(ESPNOW_DATA_TYPE_RESERVE, bcast_mac,
-                                                (const uint8_t *)new_block_str, sizeof(new_block_str));
+            // Serialize the block.
+            uint8_t *serialized_block = NULL;
+            size_t block_size = blockchain_serialize_block(&new_block, &serialized_block);
+            if (block_size == 0) {
+                ESP_LOGE(TAG, "Failed to serialize new block");
+            } else {
+                // Allocate a send buffer = command size + serialized block.
+                size_t send_buffer_size = sizeof(new_block_command) + block_size;
+                uint8_t *send_buffer = malloc(send_buffer_size);
+                if (send_buffer) {
+                    memcpy(send_buffer, new_block_command, sizeof(new_block_command));
+                    memcpy(send_buffer + sizeof(new_block_command), serialized_block, block_size);
+                    // Broadcast using ESPNOW.
+                    esp_err_t ret = espnow_send_wrapper(ESPNOW_DATA_TYPE_RESERVE, bcast_mac,
+                                                        send_buffer, send_buffer_size);
+                    if (ret != ESP_OK) {
+                        ESP_LOGE(TAG, "Failed to broadcast new block: %s", esp_err_to_name(ret));
+                    }
+                    free(send_buffer);
+                } else {
+                    ESP_LOGE(TAG, "Failed to allocate send buffer");
+                }
+                free(serialized_block);
+            }
 
             vTaskDelay(pdMS_TO_TICKS(500));
             

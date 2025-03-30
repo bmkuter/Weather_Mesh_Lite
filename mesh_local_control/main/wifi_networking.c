@@ -1,4 +1,6 @@
 #include "wifi_networking.h"
+#include "blockchain.h"
+#include "mesh_networking.h"
 #include "secrets.h"
 
 static const char *TAG = "wifi_networking";
@@ -81,11 +83,34 @@ void tcp_server_task(void *arg)
             ESP_LOGE(TAG, "Failed to accept client connection");
             continue;
         }
-        char buffer[128];
+        char buffer[256];
         int len = recv(client_sock, buffer, sizeof(buffer) - 1, 0);
         if (len > 0) {
             buffer[len] = '\0';
             ESP_LOGI(TAG, "Received: %s", buffer);
+            if (!strcmp((char *)buffer, "READ_LEDGER")) {
+                blockchain_print_history();
+            }
+            else if (!strcmp((char *)buffer, "RESET_BLOCKCHAIN")) {
+                // Broadcast reset instruction over mesh.
+                uint8_t broadcast_mac[ESP_NOW_ETH_ALEN] = {0xFF,0xFF,0xFF,0xFF,0xFF,0xFF};
+                const char *reset_cmd = "RESET_BLOCKCHAIN";
+                esp_err_t ret = espnow_send_wrapper(ESPNOW_DATA_TYPE_RESERVE,
+                                                    broadcast_mac,
+                                                    (const uint8_t *)reset_cmd,
+                                                    strlen(reset_cmd));
+                if (ret == ESP_OK) {
+                    ESP_LOGI(TAG, "Reset command broadcast successfully");
+                } else {
+                    ESP_LOGE(TAG, "Broadcast of reset command failed: %s", esp_err_to_name(ret));
+                }
+                // Reset the local blockchain (and trigger a new election as needed).
+                blockchain_deinit();
+                blockchain_init();
+            }
+            else {
+                ESP_LOGW(TAG, "Unknown command: %s", buffer);
+            }
         }
         close(client_sock);
     }
