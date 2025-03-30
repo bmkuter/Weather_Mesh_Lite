@@ -49,49 +49,47 @@ ERR_EXIT:
     return -1;
 }
 
-void tcp_client_write_task(void *arg)
+void tcp_server_task(void *arg)
 {
-    size_t size        = 0;
-    int count          = 0;
-    char *data         = NULL;
-    esp_err_t ret      = ESP_OK;
-    uint8_t sta_mac[6] = {0};
-
-    esp_wifi_get_mac(ESP_IF_WIFI_STA, sta_mac);
-
-    ESP_LOGI(TAG, "TCP client write task is running");
-
+    int listen_sock = socket(AF_INET, SOCK_STREAM, 0);
+    if (listen_sock < 0) {
+        ESP_LOGE(TAG, "Unable to create server socket");
+        vTaskDelete(NULL);
+    }
+    struct sockaddr_in server_addr = {
+        .sin_family = AF_INET,
+        .sin_port = htons(CONFIG_SERVER_PORT),
+        .sin_addr.s_addr = INADDR_ANY,
+    };
+    if (bind(listen_sock, (struct sockaddr *)&server_addr, sizeof(server_addr)) < 0) {
+        ESP_LOGE(TAG, "Socket bind failed");
+        close(listen_sock);
+        vTaskDelete(NULL);
+    }
+    if (listen(listen_sock, 1) < 0) {
+        ESP_LOGE(TAG, "Socket listen failed");
+        close(listen_sock);
+        vTaskDelete(NULL);
+    }
+    ESP_LOGI(TAG, "TCP server listening on port %d", CONFIG_SERVER_PORT);
+    
     while (1) {
-        if (g_sockfd == -1) {
-            vTaskDelay(500 / portTICK_PERIOD_MS);
-            g_sockfd = socket_tcp_client_create(CONFIG_SERVER_IP, CONFIG_SERVER_PORT);
+        struct sockaddr_in client_addr;
+        socklen_t addr_len = sizeof(client_addr);
+        int client_sock = accept(listen_sock, (struct sockaddr *)&client_addr, &addr_len);
+        if (client_sock < 0) {
+            ESP_LOGE(TAG, "Failed to accept client connection");
             continue;
         }
-
-        vTaskDelay(3000 / portTICK_PERIOD_MS);
-
-        size = asprintf(&data, "{\"src_addr\": \"" MACSTR "\",\"data\": \"Hello TCP Server!\",\"level\": %d,\"count\": %d}\r\n",
-                        MAC2STR(sta_mac), esp_mesh_lite_get_level(), count++);
-
-        ESP_LOGD(TAG, "TCP write, size: %d, data: %s", size, data);
-        ret = write(g_sockfd, data, size);
-        free(data);
-
-        if (ret <= 0) {
-            ESP_LOGE(TAG, "<%s> TCP write", strerror(errno));
-            close(g_sockfd);
-            g_sockfd = -1;
-            continue;
+        char buffer[128];
+        int len = recv(client_sock, buffer, sizeof(buffer) - 1, 0);
+        if (len > 0) {
+            buffer[len] = '\0';
+            ESP_LOGI(TAG, "Received: %s", buffer);
         }
+        close(client_sock);
     }
-
-    ESP_LOGI(TAG, "TCP client write task is exit");
-
-    close(g_sockfd);
-    g_sockfd = -1;
-    if (data) {
-        free(data);
-    }
+    close(listen_sock);
     vTaskDelete(NULL);
 }
 
@@ -100,9 +98,9 @@ void ip_event_sta_got_ip_handler(void *arg, esp_event_base_t event_base,
 {
     ESP_LOGE(TAG, "Sta got ip event");
     static bool tcp_task = false;
-
+    
     if (!tcp_task) {
-        xTaskCreate(tcp_client_write_task, "tcp_client_write_task", 4 * 1024, NULL, 5, NULL);
+        xTaskCreate(tcp_server_task, "tcp_server_task", 4 * 1024, NULL, 5, NULL);
         tcp_task = true;
     }
 }
