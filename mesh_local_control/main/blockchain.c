@@ -401,7 +401,8 @@ void sensor_blockchain_task(void *pvParameters)
                 }
                 list = list->next;
             }
-            ESP_LOGI(TAG, "All sensor responses processed");
+            ESP_LOGI(TAG, "All sensor responses processed: total sensors = %" PRIu32,
+                     new_block.num_sensor_readings);
             
             // Calculate new block hash and continue as before...
             calculate_block_hash(&new_block);
@@ -463,6 +464,9 @@ void sensor_blockchain_task(void *pvParameters)
                 // MACSTR expects 6 hex values.
                 snprintf(election_msg, sizeof(election_msg), "ELECTION:" MACSTR,
                             MAC2STR(selected->node->mac_addr));
+                // Setting our own record of the elected node
+                memcpy(elected_leader_mac, selected->node->mac_addr, ESP_NOW_ETH_ALEN);
+                ESP_LOGI(TAG, "Selected next leader: " MACSTR, MAC2STR(selected->node->mac_addr));
                 // Broadcast the election message using the broadcast MAC address.
                 uint8_t bcast_mac[ESP_NOW_ETH_ALEN] = {0xFF,0xFF,0xFF,0xFF,0xFF,0xFF};
                 ESP_LOGI(TAG, "Broadcasting election message: %s", election_msg);

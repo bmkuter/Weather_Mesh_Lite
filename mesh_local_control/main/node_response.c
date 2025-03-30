@@ -1,7 +1,10 @@
 #include "node_response.h"
 #include "string.h"
+#include "esp_mac.h"
 
 #define SENSOR_RESPONSE_QUEUE_LENGTH 10
+
+static const char *TAG = "node_response";
 
 // Static queue to hold sensor responses.
 static QueueHandle_t sensorResponseQueue = NULL;
@@ -26,8 +29,10 @@ bool waitForNodeResponse(const uint8_t *remote_mac, sensor_record_t *response, T
     sensor_response_t recvResp;
     TickType_t start = xTaskGetTickCount();
     TickType_t remaining = timeout;
+// IS PROBLEM HERE RIGHT NOW? CHILD NODE SENDS DATA BUT THIS DOESN'T RECV IT
     while(remaining > 0) {
         if (xQueueReceive(sensorResponseQueue, &recvResp, remaining) == pdPASS) {
+            ESP_LOGI(TAG, "Received response from " MACSTR, MAC2STR(recvResp.mac));
             // Compare the sender MAC address.
             if (memcmp(recvResp.mac, remote_mac, sizeof(recvResp.mac)) == 0) {
                 *response = recvResp.sensor_data;

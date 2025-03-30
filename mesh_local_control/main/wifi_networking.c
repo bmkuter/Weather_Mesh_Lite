@@ -124,6 +124,13 @@ void ip_event_sta_got_ip_handler(void *arg, esp_event_base_t event_base,
     ESP_LOGE(TAG, "Sta got ip event");
     static bool tcp_task = false;
     
+    if (event_id == IP_EVENT_STA_GOT_IP) {
+        // Cast event data to the appropriate type
+        ip_event_got_ip_t* event = (ip_event_got_ip_t*) event_data;
+        esp_netif_ip_info_t ip_info = event->ip_info;
+        ESP_LOGI(TAG, "Got IP Address: " IPSTR, IP2STR(&ip_info.ip));
+    }
+
     if (!tcp_task) {
         xTaskCreate(tcp_server_task, "tcp_server_task", 4 * 1024, NULL, 5, NULL);
         tcp_task = true;
