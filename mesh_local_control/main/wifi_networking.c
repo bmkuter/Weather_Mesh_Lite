@@ -118,25 +118,6 @@ void tcp_server_task(void *arg)
     vTaskDelete(NULL);
 }
 
-void ip_event_sta_got_ip_handler(void *arg, esp_event_base_t event_base,
-    int32_t event_id, void *event_data)
-{
-    ESP_LOGE(TAG, "Sta got ip event");
-    static bool tcp_task = false;
-    
-    if (event_id == IP_EVENT_STA_GOT_IP) {
-        // Cast event data to the appropriate type
-        ip_event_got_ip_t* event = (ip_event_got_ip_t*) event_data;
-        esp_netif_ip_info_t ip_info = event->ip_info;
-        ESP_LOGI(TAG, "Got IP Address: " IPSTR, IP2STR(&ip_info.ip));
-    }
-
-    if (!tcp_task) {
-        xTaskCreate(tcp_server_task, "tcp_server_task", 4 * 1024, NULL, 5, NULL);
-        tcp_task = true;
-    }
-}
-
 void wifi_init(void)
 {
     // Station
@@ -146,7 +127,7 @@ void wifi_init(void)
             .password = SECRET_PASSWORD,
         },
     };
-    wifi_config.sta.failure_retry_cnt = 2;
+    wifi_config.sta.failure_retry_cnt = 0;
     esp_bridge_wifi_set_config(WIFI_IF_STA, &wifi_config);
 
     // Softap

@@ -24,7 +24,7 @@ static SemaphoreHandle_t blockchain_mutex = NULL;
  * Compute the SHA‑256 hash for the given block.
  * (Temporarily zero out the hash field so it is not included in the hash calculation).
  */
-static void calculate_block_hash(block_t *block) {
+void calculate_block_hash(block_t *block) {
     // Fixed fields: timestamp, prev_hash, pop_proof, heatmap, and num_sensor_readings.
     size_t fixed_size = sizeof(block->timestamp) + sizeof(block->prev_hash) +
                         sizeof(block->pop_proof) + sizeof(block->heatmap) +
@@ -89,8 +89,9 @@ static void calculate_block_hash(block_t *block) {
 }
 
 size_t blockchain_serialize_block(const block_t *block, uint8_t **out_buffer) {
+    ESP_LOGW(TAG, "Serializing block for transmission");
     // Fixed header size.
-    size_t header_size = sizeof(block->timestamp) + sizeof(block->prev_hash) +
+    size_t header_size = sizeof(block->timestamp) + sizeof(block->prev_hash) + sizeof(block->hash) +
                          sizeof(block->pop_proof) + sizeof(block->heatmap) +
                          sizeof(block->num_sensor_readings);
     // Calculate dynamic sensor portion size.
@@ -108,6 +109,8 @@ size_t blockchain_serialize_block(const block_t *block, uint8_t **out_buffer) {
     offset += sizeof(block->timestamp);
     memcpy(buffer + offset, block->prev_hash, sizeof(block->prev_hash));
     offset += sizeof(block->prev_hash);
+    memcpy(buffer + offset, block->hash, sizeof(block->hash));
+    offset += sizeof(block->hash);
     memcpy(buffer + offset, block->pop_proof, sizeof(block->pop_proof));
     offset += sizeof(block->pop_proof);
     memcpy(buffer + offset, block->heatmap, sizeof(block->heatmap));
@@ -378,10 +381,10 @@ void sensor_blockchain_task(void *pvParameters)
             ESP_LOGI(TAG, "All sensor responses processed: total sensors = %" PRIu32,
                      new_block.num_sensor_readings);
             
-            // Calculate new block hash and continue as before...
-            calculate_block_hash(&new_block);
             // Generate Proof-of-participation.
             consensus_generate_pop_proof(&new_block, my_mac);
+            // Calculate new block hash and continue as before...
+            calculate_block_hash(&new_block);
             ESP_LOGI(TAG, "Prev Hash: ");
             ESP_LOG_BUFFER_HEX_LEVEL(TAG, new_block.prev_hash, 32, ESP_LOG_INFO);
             ESP_LOGI(TAG, "Block Hash: ");

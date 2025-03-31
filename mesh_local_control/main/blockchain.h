@@ -40,6 +40,7 @@ void blockchain_print_last_block(void);
 void blockchain_print_history(void);  // New function to print the full blockchain history.
 void blockchain_receive_block(const uint8_t *data, uint16_t len);
 void sensor_blockchain_task(void *pvParameters);
+void calculate_block_hash(block_t *block);
 
 // Helper: size of a sensor record (excluding the pointer)
 static const size_t sensor_size = sizeof(uint8_t)*ESP_NOW_ETH_ALEN + sizeof(uint32_t) + sizeof(float)*2 + (MAX_NEIGHBORS*sizeof(int8_t));
