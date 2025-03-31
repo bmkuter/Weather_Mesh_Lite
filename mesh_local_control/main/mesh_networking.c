@@ -133,6 +133,13 @@ void espnow_recv_cb(const uint8_t *mac_addr, const uint8_t *data, int len)
                 ESP_LOG_BUFFER_HEX_LEVEL(TAG, received_block.hash, 32, ESP_LOG_INFO);
                 ESP_LOGI(TAG, "PoP Proof: %s", received_block.pop_proof);
                 ESP_LOGI(TAG, "Sensor readings count: %" PRIu32, received_block.num_sensor_readings);
+                // Print all sensor records.
+                sensor_record_t *cur = received_block.node_data;
+                while (cur) {
+                    ESP_LOGI(TAG, "Sensor " MACSTR ": Temp: %.2f°C, Humidity: %.2f%%",
+                             MAC2STR(cur->mac), cur->temperature, cur->humidity);
+                    cur = cur->next;
+                }
                 blockchain_add_block(&received_block);
             }
             break;

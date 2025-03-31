@@ -192,33 +192,6 @@ bool blockchain_get_last_block(block_t *block_out)
 }
 
 /**
- * Print the last block.
- */
-void blockchain_print_last_block(void)
-{
-    block_t last;
-    if (blockchain_get_last_block(&last)) {
-        ESP_LOGI(TAG, "----- Latest Block -----");
-        ESP_LOGI(TAG, "Timestamp: 0x%" PRIx32, last.timestamp);
-        ESP_LOGI(TAG, "Prev Hash: ");
-        ESP_LOG_BUFFER_HEX_LEVEL(TAG, last.prev_hash, 32, ESP_LOG_INFO);
-        ESP_LOGI(TAG, "Block Hash: ");
-        ESP_LOG_BUFFER_HEX_LEVEL(TAG, last.hash, 32, ESP_LOG_INFO);
-        ESP_LOGI(TAG, "PoP Proof: %s", last.pop_proof);
-        for (int i = 0; i < MAX_NODES; i++) {
-            sensor_record_t *record = &last.node_data[i];
-            if (record->mac[0] != 0) {
-                ESP_LOGI(TAG, "  Sensor " MACSTR ": Temp: %.2f°C, Humidity: %.2f%%",
-                         MAC2STR(record->mac), record->temperature, record->humidity);
-            }
-        }
-        ESP_LOGI(TAG, "------------------------");
-    } else {
-        ESP_LOGI(TAG, "No block available");
-    }
-}
-
-/**
  * Print the entire blockchain history.
  */
 void blockchain_print_history(void)
@@ -415,6 +388,14 @@ void sensor_blockchain_task(void *pvParameters)
             ESP_LOG_BUFFER_HEX_LEVEL(TAG, new_block.hash, 32, ESP_LOG_INFO);
             // Add block to blockchain.
             blockchain_add_block(&new_block);
+            // Log New Block including all sensor readings
+            ESP_LOGI(TAG, "Block added to blockchain");
+            sensor_record_t *record = new_block.node_data;
+            while (record) {
+                ESP_LOGI(TAG, "    Sensor " MACSTR ": Temp: %.2f°C, Humidity: %.2f%%",
+                         MAC2STR(record->mac), record->temperature, record->humidity);
+                record = record->next;
+            }
 
             // Broadcast the new block to all nodes.
             uint8_t bcast_mac[ESP_NOW_ETH_ALEN] = {0xFF,0xFF,0xFF,0xFF,0xFF,0xFF};
@@ -498,23 +479,24 @@ void sensor_blockchain_task(void *pvParameters)
             else 
             {
                 ESP_LOGW(TAG, "No election message received within timeout. Initiating leader discovery.");
-
-                char election_msg[64];
                 uint8_t zero_mac[ESP_NOW_ETH_ALEN] = {0};
                 if (memcmp(elected_leader_mac, zero_mac, ESP_NOW_ETH_ALEN) == 0) 
                 {
                     memcpy(elected_leader_mac, my_mac, ESP_NOW_ETH_ALEN);
                 }
-                snprintf(election_msg, sizeof(election_msg), "ELECTION:" MACSTR, MAC2STR(elected_leader_mac));
+                // Build binary election message: [CMD_ELECTION][elected_leader_mac]
+                uint8_t election_msg[1 + ESP_NOW_ETH_ALEN];
+                election_msg[0] = CMD_ELECTION;
+                memcpy(election_msg + 1, elected_leader_mac, ESP_NOW_ETH_ALEN);
                 uint8_t bcast_mac[ESP_NOW_ETH_ALEN] = {0xFF,0xFF,0xFF,0xFF,0xFF,0xFF};
-                esp_err_t ret = espnow_send_wrapper(ESPNOW_DATA_TYPE_RESERVE, bcast_mac, (const uint8_t *)election_msg, strlen(election_msg));
+                esp_err_t ret = espnow_send_wrapper(ESPNOW_DATA_TYPE_RESERVE, bcast_mac, election_msg, sizeof(election_msg));
                 if (ret != ESP_OK) 
                 {
                     ESP_LOGE(TAG, "Failed to send election message, err: %s", esp_err_to_name(ret));
                 } 
                 else 
                 {
-                    ESP_LOGI(TAG, "Sent election message: %s", election_msg);
+                    ESP_LOGI(TAG, "Sent election message");
                 }
                 // Wait additional time for potential leader acknowledgment.
                 vTaskDelay(pdMS_TO_TICKS(5000));
@@ -531,10 +513,12 @@ void sensor_blockchain_task(void *pvParameters)
                             {
                                 selected = selected->next;
                             }
-                            char elect_msg[64];
-                            snprintf(elect_msg, sizeof(elect_msg), "ELECTION:" MACSTR, MAC2STR(selected->node->mac_addr));
+                            // Build root election message: [CMD_ELECTION][selected node MAC]
+                            uint8_t election_msg_root[1 + ESP_NOW_ETH_ALEN];
+                            election_msg_root[0] = CMD_ELECTION;
+                            memcpy(election_msg_root + 1, selected->node->mac_addr, ESP_NOW_ETH_ALEN);
                             ESP_LOGI(TAG, "Initiating root election with MAC " MACSTR, MAC2STR(selected->node->mac_addr));
-                            ret = espnow_send_wrapper(ESPNOW_DATA_TYPE_RESERVE, bcast_mac, (const uint8_t *)elect_msg, strlen(elect_msg));
+                            ret = espnow_send_wrapper(ESPNOW_DATA_TYPE_RESERVE, bcast_mac, election_msg_root, sizeof(election_msg_root));
                             if(ret != ESP_OK) 
                             {
                                 ESP_LOGE(TAG, "Failed to broadcast election message, err: %s", esp_err_to_name(ret));
