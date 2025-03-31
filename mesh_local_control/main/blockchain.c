@@ -11,6 +11,7 @@
 #include "election_response.h"
 #include "esp_mesh_lite.h"
 #include "mbedtls/sha256.h"
+#include "command_set.h"
 
 #define BLOCKCHAIN_BUFFER_SIZE 16  // Maximum blocks stored locally
 
@@ -355,7 +356,7 @@ void sensor_blockchain_task(void *pvParameters)
         if (consensus_am_i_leader(elected_leader_mac)) 
         {
             ESP_LOGI(TAG, "I am the leader. Initiating sensor data collection.");
-            const char *pulse_msg = "PULSE";
+            uint8_t pulse_cmd = CMD_PULSE;
             uint32_t node_count = 0;
             const node_info_list_t *list = esp_mesh_lite_get_nodes_list(&node_count);
 
@@ -386,7 +387,7 @@ void sensor_blockchain_task(void *pvParameters)
             while (list) {
                 ESP_LOGI(TAG, "Sending pulse to " MACSTR, MAC2STR(list->node->mac_addr));
                 esp_err_t ret = espnow_send_wrapper(ESPNOW_DATA_TYPE_RESERVE, list->node->mac_addr,
-                                                    (const uint8_t *)pulse_msg, strlen(pulse_msg));
+                                                    &pulse_cmd, sizeof(pulse_cmd));
                 if (ret != ESP_OK) {
                     ESP_LOGE(TAG, "Failed to send pulse to " MACSTR, MAC2STR(list->node->mac_addr));
                 }
@@ -417,8 +418,6 @@ void sensor_blockchain_task(void *pvParameters)
 
             // Broadcast the new block to all nodes.
             uint8_t bcast_mac[ESP_NOW_ETH_ALEN] = {0xFF,0xFF,0xFF,0xFF,0xFF,0xFF};
-            // Pack block payload with a command prefix.
-            char new_block_command[] = "NEW_BLOCK";
             // Serialize the block.
             uint8_t *serialized_block = NULL;
             size_t block_size = blockchain_serialize_block(&new_block, &serialized_block);
@@ -426,11 +425,11 @@ void sensor_blockchain_task(void *pvParameters)
                 ESP_LOGE(TAG, "Failed to serialize new block");
             } else {
                 // Allocate a send buffer = command size + serialized block.
-                size_t send_buffer_size = sizeof(new_block_command) + block_size;
+                size_t send_buffer_size = 1 + block_size;
                 uint8_t *send_buffer = malloc(send_buffer_size);
                 if (send_buffer) {
-                    memcpy(send_buffer, new_block_command, sizeof(new_block_command));
-                    memcpy(send_buffer + sizeof(new_block_command), serialized_block, block_size);
+                    send_buffer[0] = CMD_NEW_BLOCK;
+                    memcpy(send_buffer + 1, serialized_block, block_size);
                     // Broadcast using ESPNOW.
                     esp_err_t ret = espnow_send_wrapper(ESPNOW_DATA_TYPE_RESERVE, bcast_mac,
                                                         send_buffer, send_buffer_size);
@@ -459,19 +458,17 @@ void sensor_blockchain_task(void *pvParameters)
                 for (uint32_t i = 0; i < index; i++) {
                     selected = selected->next;
                 } 
-                char election_msg[64];
-                // Format election message with the selected node's MAC address.
-                // MACSTR expects 6 hex values.
-                snprintf(election_msg, sizeof(election_msg), "ELECTION:" MACSTR,
-                            MAC2STR(selected->node->mac_addr));
+                // Build binary election message: [CMD_ELECTION][6-byte selected MAC]
+                uint8_t election_msg[1 + ESP_NOW_ETH_ALEN];
+                election_msg[0] = CMD_ELECTION;
+                memcpy(election_msg + 1, selected->node->mac_addr, ESP_NOW_ETH_ALEN);
                 // Setting our own record of the elected node
                 memcpy(elected_leader_mac, selected->node->mac_addr, ESP_NOW_ETH_ALEN);
                 ESP_LOGI(TAG, "Selected next leader: " MACSTR, MAC2STR(selected->node->mac_addr));
                 // Broadcast the election message using the broadcast MAC address.
                 uint8_t bcast_mac[ESP_NOW_ETH_ALEN] = {0xFF,0xFF,0xFF,0xFF,0xFF,0xFF};
-                ESP_LOGI(TAG, "Broadcasting election message: %s", election_msg);
                 esp_err_t ret_e = espnow_send_wrapper(ESPNOW_DATA_TYPE_RESERVE, bcast_mac,
-                                                        (const uint8_t *)election_msg, strlen(election_msg));
+                                                      election_msg, sizeof(election_msg));
                 if(ret_e != ESP_OK) {
                     ESP_LOGE(TAG, "Failed to broadcast election message, err: %s", esp_err_to_name(ret_e));
                 }
@@ -553,7 +550,7 @@ void sensor_blockchain_task(void *pvParameters)
         }
         // blockchain_print_history();
 
-        // Wait for 60 seconds before generating the next block.
-        vTaskDelay(pdMS_TO_TICKS(60000));
+        // Wait for 15 seconds before generating the next block.
+        vTaskDelay(pdMS_TO_TICKS(15000));
     }
 }

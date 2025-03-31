@@ -1,6 +1,7 @@
 #include "mesh_networking.h"
 #include "node_response.h"
 #include "election_response.h"
+#include "command_set.h"
 
 static const char *TAG = "mesh_networking";
 
@@ -8,150 +9,160 @@ uint8_t broadcast_mac[ESP_NOW_ETH_ALEN] = {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF};
 
 void espnow_recv_cb(const uint8_t *mac_addr, const uint8_t *data, int len)
 {
-    if (strncmp((const char *)data, "ACK", len) == 0) {
-        ESP_LOGI(TAG, "Got ACK from " MACSTR, MAC2STR(mac_addr));
-    }
-    else if (strncmp((const char *)data, "PULSE", 5) == 0) {
-        // Received pulse from leader: take a sensor reading.
-        float temp = temperature_probe_read_temperature();
-        float humidity = temperature_probe_read_humidity();
-        uint32_t now = (uint32_t)time(NULL);
-        char sensor_msg[128];
-        // Format the sensor message as "SENSOR_DATA:temp:humidity:timestamp"
-        snprintf(sensor_msg, sizeof(sensor_msg), "SENSOR_DATA:%.2f:%.2f:%lu", temp, humidity, now);
-        // Broadcast sensor data to the entire mesh by sending to the broadcast MAC.
-        esp_err_t ret = espnow_send_wrapper(ESPNOW_DATA_TYPE_RESERVE, broadcast_mac,
-                                            (const uint8_t *)sensor_msg, strlen(sensor_msg));
-        if(ret != ESP_OK) {
-            ESP_LOGE(TAG, "Failed to broadcast sensor data: " MACSTR, MAC2STR(broadcast_mac));
-        } else {
-            ESP_LOGI(TAG, "Sensor data broadcasted: %s", sensor_msg);
-        }
-    }
-    else if (strncmp((const char *)data, "CHAIN_REQ", 9) == 0) {
-        // Another node requests the blockchain (e.g., after rejoining).
-        // If this node is the leader (dummy check here), respond accordingly.
-        if (consensus_am_i_leader(0)) { // Replace 0 with proper logic to determine leader status.
-            const char *resp = "CHAIN_RESP:Blockchain syncing not implemented";
-            esp_err_t ret = espnow_send_wrapper(ESPNOW_DATA_TYPE_RESERVE, mac_addr,
-                                                (const uint8_t *)resp, strlen(resp));
-            if(ret != ESP_OK) {
-                ESP_LOGE(TAG, "Failed to send blockchain sync response to " MACSTR, MAC2STR(mac_addr));
+    if (len < 1) return; // must have at least the command byte
+    uint8_t cmd = data[0];
+    switch (cmd) {
+        case CMD_ACK:
+            ESP_LOGI(TAG, "Got ACK from " MACSTR, MAC2STR(mac_addr));
+            break;
+        case CMD_PULSE:
+            {
+                // Received pulse from leader: take a sensor reading.
+                float temp = temperature_probe_read_temperature();
+                float humidity = temperature_probe_read_humidity();
+                uint32_t now = (uint32_t)time(NULL);
+                // Build binary sensor message: [CMD_SENSOR_DATA][temp][humidity][timestamp]
+                uint8_t sensor_msg[1 + sizeof(float)*2 + sizeof(uint32_t)];
+                sensor_msg[0] = CMD_SENSOR_DATA;
+                size_t offset = 1;
+                memcpy(sensor_msg + offset, &temp, sizeof(float));
+                offset += sizeof(float);
+                memcpy(sensor_msg + offset, &humidity, sizeof(float));
+                offset += sizeof(float);
+                memcpy(sensor_msg + offset, &now, sizeof(uint32_t));
+                // Broadcast sensor data.
+                esp_err_t ret = espnow_send_wrapper(ESPNOW_DATA_TYPE_RESERVE, broadcast_mac,
+                                                    sensor_msg, sizeof(sensor_msg));
+                if(ret != ESP_OK) {
+                    ESP_LOGE(TAG, "Failed to broadcast sensor data: " MACSTR, MAC2STR(broadcast_mac));
+                } else {
+                    ESP_LOGI(TAG, "Sensor data broadcasted");
+                }
             }
-        }
-    }
-    else if (strncmp((const char *)data, "ELECTION:", 9) == 0) {
-        uint8_t leader_mac[ESP_NOW_ETH_ALEN] = {0};
-        int values[ESP_NOW_ETH_ALEN];
-        // Parse message formatted as "ELECTION:XX:XX:XX:XX:XX:XX"
-        if (sscanf((const char *)data, "ELECTION:%2x:%2x:%2x:%2x:%2x:%2x",
-                   &values[0], &values[1], &values[2],
-                   &values[3], &values[4], &values[5]) == ESP_NOW_ETH_ALEN) {
-            for (int i = 0; i < ESP_NOW_ETH_ALEN; i++) {
-                leader_mac[i] = (uint8_t)values[i];
+            break;
+        case CMD_CHAIN_REQ:
+            {
+                // Another node requests the blockchain.
+                if (consensus_am_i_leader(0)) { // Replace with proper leader status check.
+                    const char reply_text[] = "Blockchain syncing not implemented";
+                    uint8_t reply[1 + sizeof(reply_text)];
+                    reply[0] = CMD_CHAIN_RESP;
+                    memcpy(reply + 1, reply_text, sizeof(reply_text));
+                    esp_err_t ret = espnow_send_wrapper(ESPNOW_DATA_TYPE_RESERVE, mac_addr,
+                                                        reply, sizeof(reply));
+                    if(ret != ESP_OK) {
+                        ESP_LOGE(TAG, "Failed to send blockchain sync response to " MACSTR, MAC2STR(mac_addr));
+                    }
+                }
             }
-            election_response_push(mac_addr, leader_mac);
-            ESP_LOGI(TAG, "Election message from " MACSTR ": next leader MAC = " MACSTR,
-                     MAC2STR(mac_addr), MAC2STR(leader_mac));
-        } else {
-            ESP_LOGE(TAG, "Failed to parse election message from " MACSTR, MAC2STR(mac_addr));
-        }
-    }
-    else if (strncmp((const char *)data, "NEW_BLOCK", sizeof("NEW_BLOCK")) == 0) {
-        // Data after the command prefix is the serialized block.
-        const uint8_t *serialized_data = data + sizeof("NEW_BLOCK");
-        // First, parse header fields.
-        size_t header_size = sizeof(uint32_t) + 32 + sizeof(((block_t *)0)->pop_proof) +
-                             HEATMAP_SIZE * sizeof(uint8_t) + sizeof(uint32_t);
-        if (len < sizeof("NEW_BLOCK") + header_size) {
-            ESP_LOGE(TAG, "Received block too short");
-            return;
-        }
-        size_t offset = 0;
-        block_t received_block;
-        memset(&received_block, 0, sizeof(block_t));
-        memcpy(&received_block.timestamp, serialized_data + offset, sizeof(received_block.timestamp));
-        offset += sizeof(received_block.timestamp);
-        memcpy(received_block.prev_hash, serialized_data + offset, 32);
-        offset += 32;
-        memcpy(received_block.pop_proof, serialized_data + offset, sizeof(received_block.pop_proof));
-        offset += sizeof(received_block.pop_proof);
-        memcpy(received_block.heatmap, serialized_data + offset, HEATMAP_SIZE);
-        offset += HEATMAP_SIZE;
-        memcpy(&received_block.num_sensor_readings, serialized_data + offset, sizeof(received_block.num_sensor_readings));
-        offset += sizeof(received_block.num_sensor_readings);
-        
-        // Calculate expected total size.
-        size_t expected_size = header_size + (received_block.num_sensor_readings * sensor_size);
-        if (len != sizeof("NEW_BLOCK") + expected_size) {
-            ESP_LOGE(TAG, "Received block size mismatch: expected %d, got %d", (int)(sizeof("NEW_BLOCK") + expected_size), len);
-            return;
-        }
-        // Now, rebuild the sensor linked list.
-        sensor_record_t *head = NULL, *tail = NULL;
-        for (uint32_t i = 0; i < received_block.num_sensor_readings; i++) {
-            sensor_record_t *rec = malloc(sizeof(sensor_record_t));
-            if (!rec) {
-                ESP_LOGE(TAG, "Failed to allocate memory for sensor record");
-                break; // possibly free previously allocated records
+            break;
+        case CMD_ELECTION:
+            {
+                // Payload (after first byte) should be 6 bytes MAC.
+                if (len < 1 + ESP_NOW_ETH_ALEN) {
+                    ESP_LOGE(TAG, "Election message too short from " MACSTR, MAC2STR(mac_addr));
+                    break;
+                }
+                uint8_t leader_mac[ESP_NOW_ETH_ALEN];
+                memcpy(leader_mac, data + 1, ESP_NOW_ETH_ALEN);
+                election_response_push(mac_addr, leader_mac);
+                ESP_LOGI(TAG, "Election message from " MACSTR ": next leader MAC = " MACSTR,
+                         MAC2STR(mac_addr), MAC2STR(leader_mac));
             }
-            memset(rec, 0, sizeof(sensor_record_t));
-            memcpy(rec->mac, serialized_data + offset, sizeof(rec->mac));
-            offset += sizeof(rec->mac);
-            memcpy(&rec->timestamp, serialized_data + offset, sizeof(rec->timestamp));
-            offset += sizeof(rec->timestamp);
-            memcpy(&rec->temperature, serialized_data + offset, sizeof(rec->temperature));
-            offset += sizeof(rec->temperature);
-            memcpy(&rec->humidity, serialized_data + offset, sizeof(rec->humidity));
-            offset += sizeof(rec->humidity);
-            memcpy(rec->rssi, serialized_data + offset, MAX_NEIGHBORS * sizeof(int8_t));
-            offset += MAX_NEIGHBORS * sizeof(int8_t);
-            rec->next = NULL;
-            if (head == NULL) {
-                head = rec;
-                tail = rec;
-            } else {
-                tail->next = rec;
-                tail = rec;
+            break;
+        case CMD_NEW_BLOCK:
+            {
+                // Data after first byte is the serialized block.
+                const uint8_t *serialized_data = data + 1;
+                int payload_len = len - 1;
+                size_t header_size = sizeof(uint32_t) + 32 + sizeof(((block_t *)0)->pop_proof) +
+                                     HEATMAP_SIZE * sizeof(uint8_t) + sizeof(uint32_t);
+                if (payload_len < header_size) {
+                    ESP_LOGE(TAG, "Received block too short");
+                    return;
+                }
+                size_t offset = 0;
+                block_t received_block;
+                memset(&received_block, 0, sizeof(block_t));
+                memcpy(&received_block.timestamp, serialized_data + offset, sizeof(received_block.timestamp));
+                offset += sizeof(received_block.timestamp);
+                memcpy(received_block.prev_hash, serialized_data + offset, 32);
+                offset += 32;
+                memcpy(received_block.pop_proof, serialized_data + offset, sizeof(received_block.pop_proof));
+                offset += sizeof(received_block.pop_proof);
+                memcpy(received_block.heatmap, serialized_data + offset, HEATMAP_SIZE);
+                offset += HEATMAP_SIZE;
+                memcpy(&received_block.num_sensor_readings, serialized_data + offset, sizeof(received_block.num_sensor_readings));
+                offset += sizeof(received_block.num_sensor_readings);
+                size_t expected_size = header_size + (received_block.num_sensor_readings * sensor_size);
+                if (payload_len != expected_size) {
+                    ESP_LOGE(TAG, "Received block size mismatch: expected %d, got %d", (int)(expected_size + 1), len);
+                    return;
+                }
+                sensor_record_t *head = NULL, *tail = NULL;
+                for (uint32_t i = 0; i < received_block.num_sensor_readings; i++) {
+                    sensor_record_t *rec = malloc(sizeof(sensor_record_t));
+                    if (!rec) {
+                        ESP_LOGE(TAG, "Failed to allocate memory for sensor record");
+                        break;
+                    }
+                    memset(rec, 0, sizeof(sensor_record_t));
+                    memcpy(rec->mac, serialized_data + offset, sizeof(rec->mac));
+                    offset += sizeof(rec->mac);
+                    memcpy(&rec->timestamp, serialized_data + offset, sizeof(rec->timestamp));
+                    offset += sizeof(rec->timestamp);
+                    memcpy(&rec->temperature, serialized_data + offset, sizeof(rec->temperature));
+                    offset += sizeof(rec->temperature);
+                    memcpy(&rec->humidity, serialized_data + offset, sizeof(rec->humidity));
+                    offset += sizeof(rec->humidity);
+                    memcpy(rec->rssi, serialized_data + offset, MAX_NEIGHBORS * sizeof(int8_t));
+                    offset += MAX_NEIGHBORS * sizeof(int8_t);
+                    rec->next = NULL;
+                    if (head == NULL) {
+                        head = rec;
+                        tail = rec;
+                    } else {
+                        tail->next = rec;
+                        tail = rec;
+                    }
+                }
+                received_block.node_data = head;
+                ESP_LOGI(TAG, "Received new block:");
+                ESP_LOGI(TAG, "Timestamp: %" PRIu32, received_block.timestamp);
+                ESP_LOG_BUFFER_HEX_LEVEL(TAG, received_block.prev_hash, 32, ESP_LOG_INFO);
+                ESP_LOG_BUFFER_HEX_LEVEL(TAG, received_block.hash, 32, ESP_LOG_INFO);
+                ESP_LOGI(TAG, "PoP Proof: %s", received_block.pop_proof);
+                ESP_LOGI(TAG, "Sensor readings count: %" PRIu32, received_block.num_sensor_readings);
+                blockchain_add_block(&received_block);
             }
-        }
-        received_block.node_data = head;
-        
-        ESP_LOGI(TAG, "Received new block:");
-        ESP_LOGI(TAG, "Timestamp: %" PRIu32, received_block.timestamp);
-        ESP_LOGI(TAG, "Prev Hash:");
-        ESP_LOG_BUFFER_HEX_LEVEL(TAG, received_block.prev_hash, 32, ESP_LOG_INFO);
-        ESP_LOGI(TAG, "Block Hash:");
-        ESP_LOG_BUFFER_HEX_LEVEL(TAG, received_block.hash, 32, ESP_LOG_INFO);
-        ESP_LOGI(TAG, "PoP Proof: %s", received_block.pop_proof);
-        ESP_LOGI(TAG, "Sensor readings count: %" PRIu32, received_block.num_sensor_readings);
-        
-        // Now add the received block.
-        blockchain_add_block(&received_block);
-    }
-    else if (strncmp((const char *)data, "SENSOR_DATA:", sizeof("SENSOR_DATA:")) == 0){
-        // Check for sensor data submission.
-        ESP_LOGI(TAG, "Received sensor data from " MACSTR ": %.*s", MAC2STR(mac_addr), len, data);
-        sensor_record_t sensorData = {0};
-        // Set sender MAC in sensor record.
-        memcpy(sensorData.mac, mac_addr, ESP_NOW_ETH_ALEN);
-        // Example expected format now: "SENSOR_DATA:%f:%f:%lu"
-        sscanf((const char *)data, "SENSOR_DATA:%f:%f:%" PRIu32,
-                &sensorData.temperature,
-                &sensorData.humidity,
-                &sensorData.timestamp);
-        // Push the parsed data into the response queue.
-        node_response_push(mac_addr, &sensorData);
-    } 
-    else if (strncmp((const char *)data, "RESET_BLOCKCHAIN", sizeof("RESET_BLOCKCHAIN")))
-    {
-        // Reset the local blockchain (and trigger a new election as needed).
-        blockchain_deinit();
-        blockchain_init();
-    }
-    else 
-    {
-        ESP_LOGI(TAG, "Received unknown message from " MACSTR ": %.*s", MAC2STR(mac_addr), len, data);
+            break;
+        case CMD_SENSOR_DATA:
+            {
+                // Expect payload: [CMD_SENSOR_DATA][float temp][float humidity][uint32_t timestamp]
+                if (len != 1 + sizeof(float)*2 + sizeof(uint32_t)) {
+                    ESP_LOGE(TAG, "Invalid sensor data length from " MACSTR, MAC2STR(mac_addr));
+                    break;
+                }
+                sensor_record_t sensorData = {0};
+                memcpy(sensorData.mac, mac_addr, ESP_NOW_ETH_ALEN);
+                size_t offset = 1;
+                memcpy(&sensorData.temperature, data + offset, sizeof(float));
+                offset += sizeof(float);
+                memcpy(&sensorData.humidity, data + offset, sizeof(float));
+                offset += sizeof(float);
+                memcpy(&sensorData.timestamp, data + offset, sizeof(uint32_t));
+                node_response_push(mac_addr, &sensorData);
+                ESP_LOGI(TAG, "Received sensor data from " MACSTR, MAC2STR(mac_addr));
+            }
+            break;
+        case CMD_RESET_BLOCKCHAIN:
+            ESP_LOGI(TAG, "Received reset command from " MACSTR, MAC2STR(mac_addr));
+            blockchain_deinit();
+            blockchain_init();
+            break;
+        default:
+            ESP_LOGI(TAG, "Received unknown command 0x%02x from " MACSTR, cmd, MAC2STR(mac_addr));
+            break;
     }
 }
 

@@ -306,6 +306,13 @@ esp_err_t espnow_send_wrapper(uint8_t type, const uint8_t *dest_addr, const uint
             ESP_LOGE(TAG, "Failed adding peer: %s", esp_err_to_name(ret));
         }
     }
+    else if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to send ESPNOW msg to " MACSTR ", err=0x%x:%s",
+                 MAC2STR(dest_addr), ret, esp_err_to_name(ret));
+    }
+    else {
+        ESP_LOGI(TAG, "Sent ESPNOW msg to " MACSTR ", data: %.*s", MAC2STR(dest_addr), len, data);
+    }
     return ret;
 }
 
