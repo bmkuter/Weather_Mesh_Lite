@@ -1,5 +1,16 @@
 idf_component_register(
-    SRCS "ws_comm.c" "external_comm.c" "election_response.c" "node_response.c" "node_id.c" "consensus.c" "blockchain.c" "main.c" "logger.c" "my_utility.c" "wifi_networking.c" "mesh_networking.c" "temperature_probe.c"
+    SRCS 
+        "blockchain.c"
+        "consensus.c"
+        "election_response.c"
+        "logger.c"
+        "main.c"
+        "mesh_networking.c"
+        "my_utility.c"
+        "node_id.c"
+        "node_response.c"
+        "temperature_probe.c"
+        "wifi_networking.c"
     INCLUDE_DIRS "."
 )
 
