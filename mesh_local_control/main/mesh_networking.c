@@ -82,31 +82,40 @@ void espnow_recv_cb(const uint8_t *mac_addr, const uint8_t *data, int len)
                     return;
                 }
                 size_t offset = 0;
-                block_t received_block;
-                memset(&received_block, 0, sizeof(block_t));
-                memcpy(&received_block.timestamp, serialized_data + offset, sizeof(received_block.timestamp));
-                offset += sizeof(received_block.timestamp);
-                memcpy(received_block.prev_hash, serialized_data + offset, 32);
-                offset += 32;
-                memcpy(received_block.hash, serialized_data + offset, 32);
-                offset += 32;
-                memcpy(received_block.pop_proof, serialized_data + offset, sizeof(received_block.pop_proof));
-                offset += sizeof(received_block.pop_proof);
-                memcpy(received_block.heatmap, serialized_data + offset, HEATMAP_SIZE);
-                offset += HEATMAP_SIZE;
-                memcpy(&received_block.num_sensor_readings, serialized_data + offset, sizeof(received_block.num_sensor_readings));
-                offset += sizeof(received_block.num_sensor_readings);
-                
-                size_t expected_size = header_size + (received_block.num_sensor_readings * sensor_size);
-                if (payload_len != expected_size) {
-                    ESP_LOGE(TAG, "Received block size mismatch: expected %d, got %d", (int)(expected_size + 1), len);
+                // Allocate the block dynamically.
+                block_t *received_block = malloc(sizeof(block_t));
+                if (!received_block) {
+                    ESP_LOGE(TAG, "Failed to allocate memory for received block");
                     return;
                 }
+                memset(received_block, 0, sizeof(block_t));
+                
+                memcpy(&received_block->timestamp, serialized_data + offset, sizeof(received_block->timestamp));
+                offset += sizeof(received_block->timestamp);
+                memcpy(received_block->prev_hash, serialized_data + offset, 32);
+                offset += 32;
+                memcpy(received_block->hash, serialized_data + offset, 32);
+                offset += 32;
+                memcpy(received_block->pop_proof, serialized_data + offset, sizeof(received_block->pop_proof));
+                offset += sizeof(received_block->pop_proof);
+                memcpy(received_block->heatmap, serialized_data + offset, HEATMAP_SIZE);
+                offset += HEATMAP_SIZE;
+                memcpy(&received_block->num_sensor_readings, serialized_data + offset, sizeof(received_block->num_sensor_readings));
+                offset += sizeof(received_block->num_sensor_readings);
+                
+                size_t expected_size = header_size + (received_block->num_sensor_readings * sensor_size);
+                if (payload_len != (int)expected_size) {
+                    ESP_LOGE(TAG, "Received block size mismatch: expected %d, got %d", (int)(expected_size + 1), len);
+                    free(received_block);
+                    return;
+                }
+                
                 sensor_record_t *head = NULL, *tail = NULL;
-                for (uint32_t i = 0; i < received_block.num_sensor_readings; i++) {
+                for (uint32_t i = 0; i < received_block->num_sensor_readings; i++) {
                     sensor_record_t *rec = malloc(sizeof(sensor_record_t));
                     if (!rec) {
                         ESP_LOGE(TAG, "Failed to allocate memory for sensor record");
+                        // (Free previously allocated sensor records here)
                         break;
                     }
                     memset(rec, 0, sizeof(sensor_record_t));
@@ -129,21 +138,21 @@ void espnow_recv_cb(const uint8_t *mac_addr, const uint8_t *data, int len)
                         tail = rec;
                     }
                 }
-                received_block.node_data = head;
-
-                // Create a temporary copy of received_block and zero out the hash field.
-                block_t temp_block = received_block;
+                received_block->node_data = head;
+                
+                // Create a temporary copy of the block to validate hash.
+                block_t temp_block = *received_block;
                 memset(temp_block.hash, 0, sizeof(temp_block.hash));
-                // Log temp_block members versus received_block.
                 ESP_LOGW(TAG, "Temp Block:");
                 ESP_LOGI(TAG, "Timestamp: %" PRIu32, temp_block.timestamp);
                 ESP_LOGI(TAG, "Prev Hash: ");
                 ESP_LOG_BUFFER_HEX_LEVEL(TAG, temp_block.prev_hash, 32, ESP_LOG_INFO);
-                ESP_LOGI(TAG, "Block Hash: ");
+                ESP_LOGI(TAG, "Block Hash (zeroed): ");
                 ESP_LOG_BUFFER_HEX_LEVEL(TAG, temp_block.hash, 32, ESP_LOG_INFO);
                 ESP_LOGI(TAG, "PoP Proof: %s", temp_block.pop_proof);
                 ESP_LOGI(TAG, "Sensor readings count: %" PRIu32, temp_block.num_sensor_readings);
-                // Print all sensor records.
+                
+                // Print sensor records for debugging.
                 sensor_record_t *cur = temp_block.node_data;
                 while (cur) {
                     ESP_LOGI(TAG, "Sensor " MACSTR ": Temp: %.2f°C, Humidity: %.2f%%",
@@ -152,53 +161,59 @@ void espnow_recv_cb(const uint8_t *mac_addr, const uint8_t *data, int len)
                 }
                 
                 ESP_LOGW(TAG, "Recv Block:");
-                ESP_LOGI(TAG, "Timestamp: %" PRIu32, received_block.timestamp);
+                ESP_LOGI(TAG, "Timestamp: %" PRIu32, received_block->timestamp);
                 ESP_LOGI(TAG, "Prev Hash: ");
-                ESP_LOG_BUFFER_HEX_LEVEL(TAG, received_block.prev_hash, 32, ESP_LOG_INFO);
+                ESP_LOG_BUFFER_HEX_LEVEL(TAG, received_block->prev_hash, 32, ESP_LOG_INFO);
                 ESP_LOGI(TAG, "Block Hash: ");
-                ESP_LOG_BUFFER_HEX_LEVEL(TAG, received_block.hash, 32, ESP_LOG_INFO);
-                ESP_LOGI(TAG, "PoP Proof: %s", received_block.pop_proof);
-                ESP_LOGI(TAG, "Sensor readings count: %" PRIu32, received_block.num_sensor_readings);
-                // Print all sensor records.
-                sensor_record_t *cur_recv = received_block.node_data;
-                while (cur_recv) {
-                    ESP_LOGI(TAG, "Sensor " MACSTR ": Temp: %.2f°C, Humidity: %.2f%%",
-                             MAC2STR(cur_recv->mac), cur_recv->temperature, cur_recv->humidity);
-                             cur_recv = cur_recv->next;
-                }
-
-                // Compute the hash over the temp block (using calculate_block_hash)
-                calculate_block_hash(&temp_block);
-                ESP_LOGW(TAG, "Hash computed for temp block:");
-                ESP_LOG_BUFFER_HEX_LEVEL(TAG, temp_block.hash, 32, ESP_LOG_INFO);
-
-                // Compare the computed hash with the received hash.
-                if (memcmp(temp_block.hash, received_block.hash, 32) != 0) {
-                    ESP_LOGE(TAG, "Block hash validation failed!");
-                    ESP_LOG_BUFFER_HEX_LEVEL(TAG, temp_block.hash, 32, ESP_LOG_INFO);
-                    ESP_LOG_BUFFER_HEX_LEVEL(TAG, received_block.hash, 32, ESP_LOG_INFO);
-                    // Handle Dispute
-                    return;
-                } else {
-                    ESP_LOGE(TAG, "Block hash validated successfully.");
-                }
-
-                ESP_LOGI(TAG, "Received new block:");
-                ESP_LOGI(TAG, "Timestamp: %" PRIu32, received_block.timestamp);
-                ESP_LOGI(TAG, "Prev Hash: ");
-                ESP_LOG_BUFFER_HEX_LEVEL(TAG, received_block.prev_hash, 32, ESP_LOG_INFO);
-                ESP_LOGI(TAG, "Hash: ");
-                ESP_LOG_BUFFER_HEX_LEVEL(TAG, received_block.hash, 32, ESP_LOG_INFO);
-                ESP_LOGI(TAG, "PoP Proof: %s", received_block.pop_proof);
-                ESP_LOGI(TAG, "Sensor readings count: %" PRIu32, received_block.num_sensor_readings);
-                // Print all sensor records.
-                cur = received_block.node_data;
+                ESP_LOG_BUFFER_HEX_LEVEL(TAG, received_block->hash, 32, ESP_LOG_INFO);
+                ESP_LOGI(TAG, "PoP Proof: %s", received_block->pop_proof);
+                ESP_LOGI(TAG, "Sensor readings count: %" PRIu32, received_block->num_sensor_readings);
+                cur = received_block->node_data;
                 while (cur) {
                     ESP_LOGI(TAG, "Sensor " MACSTR ": Temp: %.2f°C, Humidity: %.2f%%",
                              MAC2STR(cur->mac), cur->temperature, cur->humidity);
                     cur = cur->next;
                 }
-                blockchain_add_block(&received_block);
+            
+                // Compute and validate the block hash.
+                calculate_block_hash(&temp_block);
+                ESP_LOGW(TAG, "Hash computed for temp block:");
+                ESP_LOG_BUFFER_HEX_LEVEL(TAG, temp_block.hash, 32, ESP_LOG_INFO);
+                
+                if (memcmp(temp_block.hash, received_block->hash, 32) != 0) {
+                    ESP_LOGE(TAG, "Block hash validation failed!");
+                    ESP_LOG_BUFFER_HEX_LEVEL(TAG, temp_block.hash, 32, ESP_LOG_INFO);
+                    ESP_LOG_BUFFER_HEX_LEVEL(TAG, received_block->hash, 32, ESP_LOG_INFO);
+                    // Free allocated sensor records and block before returning.
+                    cur = received_block->node_data;
+                    while (cur) {
+                        sensor_record_t *next = cur->next;
+                        free(cur);
+                        cur = next;
+                    }
+                    free(received_block);
+                    return;
+                } else {
+                    ESP_LOGI(TAG, "Block hash validated successfully.");
+                }
+                
+                ESP_LOGI(TAG, "Received new block:");
+                ESP_LOGI(TAG, "Timestamp: %" PRIu32, received_block->timestamp);
+                ESP_LOGI(TAG, "Prev Hash: ");
+                ESP_LOG_BUFFER_HEX_LEVEL(TAG, received_block->prev_hash, 32, ESP_LOG_INFO);
+                ESP_LOGI(TAG, "Hash: ");
+                ESP_LOG_BUFFER_HEX_LEVEL(TAG, received_block->hash, 32, ESP_LOG_INFO);
+                ESP_LOGI(TAG, "PoP Proof: %s", received_block->pop_proof);
+                ESP_LOGI(TAG, "Sensor readings count: %" PRIu32, received_block->num_sensor_readings);
+                cur = received_block->node_data;
+                while (cur) {
+                    ESP_LOGI(TAG, "Sensor " MACSTR ": Temp: %.2f°C, Humidity: %.2f%%",
+                             MAC2STR(cur->mac), cur->temperature, cur->humidity);
+                    cur = cur->next;
+                }
+                
+                // Add the block to the blockchain (which now expects a pointer).
+                blockchain_add_block(received_block);
             }
             break;
         case CMD_SENSOR_DATA:

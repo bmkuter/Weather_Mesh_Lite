@@ -20,7 +20,7 @@ typedef struct sensor_record {
 } sensor_record_t;
 
 // Structure for a blockchain block.
-typedef struct {
+typedef struct block {
     uint32_t timestamp;                // Block creation time (in seconds)
     uint8_t prev_hash[32];             // Previous block hash
     uint32_t num_sensor_readings;      // Number of sensor records in the block
@@ -28,6 +28,7 @@ typedef struct {
     uint8_t heatmap[HEATMAP_SIZE];     // Dummy heatmap data
     uint8_t hash[32];                  // Block’s hash (computed from contents)
     char pop_proof[64];                // Proof-of-Participation string
+    struct block *next;                // Pointer to the next block in the chain
 } block_t;
 
 // Public blockchain API.
@@ -36,8 +37,7 @@ void blockchain_deinit(void);
 void blockchain_create_block(block_t *new_block, sensor_record_t sensor_data[MAX_NODES]);
 bool blockchain_add_block(block_t *new_block);
 bool blockchain_get_last_block(block_t *block_out);
-void blockchain_print_last_block(void);
-void blockchain_print_history(void);  // New function to print the full blockchain history.
+void blockchain_print_history(void);
 void blockchain_receive_block(const uint8_t *data, uint16_t len);
 void sensor_blockchain_task(void *pvParameters);
 void calculate_block_hash(block_t *block);
