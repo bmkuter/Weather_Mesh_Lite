@@ -10,5 +10,6 @@
 #define CMD_NEW_BLOCK        0x06
 #define CMD_SENSOR_DATA      0x07
 #define CMD_RESET_BLOCKCHAIN 0x08
+#define CMD_REQUEST_SPECIFIC_BLOCK 0x09
 
 #endif

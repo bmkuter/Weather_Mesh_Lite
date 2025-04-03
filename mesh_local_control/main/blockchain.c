@@ -25,10 +25,10 @@ static SemaphoreHandle_t blockchain_mutex = NULL;
  * (Temporarily zero out the hash field so it is not included in the hash calculation).
  */
 void calculate_block_hash(block_t *block) {
-    // Fixed fields: timestamp, prev_hash, pop_proof, heatmap, and num_sensor_readings.
-    size_t fixed_size = sizeof(block->timestamp) + sizeof(block->prev_hash) +
-                        sizeof(block->pop_proof) + sizeof(block->heatmap) +
-                        sizeof(block->num_sensor_readings);
+    // New fixed fields: block_num, timestamp, prev_hash, pop_proof, heatmap, and num_sensor_readings.
+    size_t fixed_size = sizeof(block->block_num) + sizeof(block->timestamp) +
+                        sizeof(block->prev_hash) + sizeof(block->pop_proof) +
+                        sizeof(block->heatmap) + sizeof(block->num_sensor_readings);
     // Total size = fixed fields + all sensor records.
     size_t total_size = fixed_size + (block->num_sensor_readings * sensor_size);
     
@@ -39,6 +39,9 @@ void calculate_block_hash(block_t *block) {
     }
     size_t offset = 0;
     
+    // Serialize the new block member.
+    memcpy(serial_buffer + offset, &block->block_num, sizeof(block->block_num));
+    offset += sizeof(block->block_num);
     memcpy(serial_buffer + offset, &block->timestamp, sizeof(block->timestamp));
     offset += sizeof(block->timestamp);
     memcpy(serial_buffer + offset, block->prev_hash, sizeof(block->prev_hash));
@@ -61,15 +64,15 @@ void calculate_block_hash(block_t *block) {
         offset += sizeof(cur->temperature);
         memcpy(serial_buffer + offset, &cur->humidity, sizeof(cur->humidity));
         offset += sizeof(cur->humidity);
-        memcpy(serial_buffer + offset, cur->rssi, MAX_NEIGHBORS*sizeof(int8_t));
-        offset += MAX_NEIGHBORS*sizeof(int8_t);
+        memcpy(serial_buffer + offset, cur->rssi, MAX_NEIGHBORS * sizeof(int8_t));
+        offset += MAX_NEIGHBORS * sizeof(int8_t);
         
         cur = cur->next;
     }
     
     ESP_LOGI(TAG, "Block serialized for hash calculation, total bytes: %d", total_size);
     ESP_LOG_BUFFER_HEX_LEVEL(TAG, serial_buffer, total_size, ESP_LOG_INFO);
-
+    
     uint8_t computed_hash[32] = {0};
     mbedtls_sha256_context ctx;
     mbedtls_sha256_init(&ctx);
@@ -90,8 +93,8 @@ void calculate_block_hash(block_t *block) {
 
 size_t blockchain_serialize_block(const block_t *block, uint8_t **out_buffer) {
     ESP_LOGW(TAG, "Serializing block for transmission");
-    // Fixed header size.
-    size_t header_size = sizeof(block->timestamp) + sizeof(block->prev_hash) + sizeof(block->hash) +
+    size_t header_size = sizeof(block->block_num) + sizeof(block->timestamp) +
+                         sizeof(block->prev_hash) + sizeof(block->hash) +
                          sizeof(block->pop_proof) + sizeof(block->heatmap) +
                          sizeof(block->num_sensor_readings);
     // Calculate dynamic sensor portion size.
@@ -105,6 +108,8 @@ size_t blockchain_serialize_block(const block_t *block, uint8_t **out_buffer) {
     }
     size_t offset = 0;
     // Serialize header.
+    memcpy(buffer + offset, &block->block_num, sizeof(block->block_num));
+    offset += sizeof(block->block_num);
     memcpy(buffer + offset, &block->timestamp, sizeof(block->timestamp));
     offset += sizeof(block->timestamp);
     memcpy(buffer + offset, block->prev_hash, sizeof(block->prev_hash));
@@ -135,6 +140,88 @@ size_t blockchain_serialize_block(const block_t *block, uint8_t **out_buffer) {
     }
     *out_buffer = buffer;
     return total_size;
+}
+
+block_t *blockchain_parse_received_block(const uint8_t *serialized_data, int payload_len)
+{
+    // New header: block_num, timestamp, prev_hash, hash, pop_proof, heatmap, num_sensor_readings.
+    size_t header_size = sizeof(uint32_t) + sizeof(uint32_t) + 32 + 32 +
+                         sizeof(((block_t *)0)->pop_proof) + (HEATMAP_SIZE * sizeof(uint8_t)) +
+                         sizeof(uint32_t);
+    if ((size_t)payload_len < header_size) {
+        ESP_LOGE(TAG, "Received block too short");
+        return NULL;
+    }
+    size_t offset = 0;
+    block_t *received_block = malloc(sizeof(block_t));
+    if (!received_block) {
+        ESP_LOGE(TAG, "Failed to allocate memory for received block");
+        return NULL;
+    }
+    memset(received_block, 0, sizeof(block_t));
+    
+    // Parse header fields.
+    memcpy(&received_block->block_num, serialized_data + offset, sizeof(received_block->block_num));
+    offset += sizeof(received_block->block_num);
+    memcpy(&received_block->timestamp, serialized_data + offset, sizeof(received_block->timestamp));
+    offset += sizeof(received_block->timestamp);
+    memcpy(received_block->prev_hash, serialized_data + offset, 32);
+    offset += 32;
+    memcpy(received_block->hash, serialized_data + offset, 32);
+    offset += 32;
+    memcpy(received_block->pop_proof, serialized_data + offset, sizeof(received_block->pop_proof));
+    offset += sizeof(received_block->pop_proof);
+    memcpy(received_block->heatmap, serialized_data + offset, HEATMAP_SIZE);
+    offset += HEATMAP_SIZE;
+    memcpy(&received_block->num_sensor_readings, serialized_data + offset, sizeof(received_block->num_sensor_readings));
+    offset += sizeof(received_block->num_sensor_readings);
+    
+    // Check that payload length matches header + sensor records.
+    size_t expected_size = header_size + (received_block->num_sensor_readings * sensor_size);
+    if ((size_t)payload_len != expected_size) {
+        ESP_LOGE(TAG, "Received block size mismatch: expected %d, got %d", (int)expected_size, payload_len);
+        free(received_block);
+        return NULL;
+    }
+    
+    // Parse sensor records.
+    sensor_record_t *head = NULL, *tail = NULL;
+    for (uint32_t i = 0; i < received_block->num_sensor_readings; i++) {
+        sensor_record_t *rec = malloc(sizeof(sensor_record_t));
+        if (!rec) {
+            ESP_LOGE(TAG, "Failed to allocate memory for sensor record");
+            // Free already allocated sensor records.
+            sensor_record_t *cur = head;
+            while(cur) {
+                sensor_record_t *next = cur->next;
+                free(cur);
+                cur = next;
+            }
+            free(received_block);
+            return NULL;
+        }
+        memset(rec, 0, sizeof(sensor_record_t));
+        memcpy(rec->mac, serialized_data + offset, sizeof(rec->mac));
+        offset += sizeof(rec->mac);
+        memcpy(&rec->timestamp, serialized_data + offset, sizeof(rec->timestamp));
+        offset += sizeof(rec->timestamp);
+        memcpy(&rec->temperature, serialized_data + offset, sizeof(rec->temperature));
+        offset += sizeof(rec->temperature);
+        memcpy(&rec->humidity, serialized_data + offset, sizeof(rec->humidity));
+        offset += sizeof(rec->humidity);
+        memcpy(rec->rssi, serialized_data + offset, MAX_NEIGHBORS * sizeof(int8_t));
+        offset += MAX_NEIGHBORS * sizeof(int8_t);
+        rec->next = NULL;
+        if (!head) {
+            head = rec;
+            tail = rec;
+        } else {
+            tail->next = rec;
+            tail = rec;
+        }
+    }
+    received_block->node_data = head;
+    return received_block;
 }
 
 uint32_t blockchain_init(void)
@@ -181,22 +268,25 @@ bool blockchain_add_block(block_t *new_block)
     if (xSemaphoreTake(blockchain_mutex, portMAX_DELAY)) {
         new_block->next = NULL;
         if (!blockchain_head) {
+            // For an empty chain, ensure block_num is 0 already.
+            new_block->block_num = 0;
             blockchain_head = new_block;
         } else {
             block_t *cur = blockchain_head;
             while (cur->next) {
                 cur = cur->next;
             }
+            // Set block_num based on the last block in the chain.
+            new_block->block_num = cur->block_num + 1;
             cur->next = new_block;
         }
         blockchain_count++;
-        ESP_LOGI(TAG, "Block added; total count = %" PRIu32, blockchain_count);
+        ESP_LOGI(TAG, "Block added; block number = %" PRIu32 ", total count = %" PRIu32, new_block->block_num, blockchain_count);
         result = true;
         xSemaphoreGive(blockchain_mutex);
     }
     return result;
 }
-
 bool blockchain_get_last_block(block_t *block_out)
 {
     bool result = false;
@@ -224,7 +314,7 @@ void blockchain_print_history(void)
         uint32_t count = 0;
         block_t *cur = blockchain_head;
         while (cur) {
-            ESP_LOGI(TAG, "Block %" PRIu32 ":", count++);
+            ESP_LOGI(TAG, "Block %" PRIu32 " (global number: %" PRIu32 "):", count++, cur->block_num);
             ESP_LOGI(TAG, "  Prev Hash:");
             ESP_LOG_BUFFER_HEX_LEVEL(TAG, cur->prev_hash, 32, ESP_LOG_INFO);
             ESP_LOGI(TAG, "  Block Hash:");
@@ -360,11 +450,14 @@ void sensor_blockchain_task(void *pvParameters)
             }
             memset(new_block, 0, sizeof(block_t));
             new_block->timestamp = (uint32_t)time(NULL);
-            
+                        
+            // Determine block number and prev_hash from the existing chain.
             block_t last;
             if (blockchain_get_last_block(&last)) {
+                new_block->block_num = last.block_num + 1;
                 memcpy(new_block->prev_hash, last.hash, sizeof(last.hash));
             } else {
+                new_block->block_num = 0;
                 memset(new_block->prev_hash, 0, sizeof(new_block->prev_hash));
             }
             new_block->node_data = NULL;

@@ -75,70 +75,11 @@ void espnow_recv_cb(const uint8_t *mac_addr, const uint8_t *data, int len)
                 // Data after first byte is the serialized block.
                 const uint8_t *serialized_data = data + 1;
                 int payload_len = len - 1;
-                size_t header_size = sizeof(uint32_t) + 32 + 32 + sizeof(((block_t *)0)->pop_proof) +
-                                     HEATMAP_SIZE * sizeof(uint8_t) + sizeof(uint32_t);
-                if (payload_len < header_size) {
-                    ESP_LOGE(TAG, "Received block too short");
-                    return;
-                }
-                size_t offset = 0;
-                // Allocate the block dynamically.
-                block_t *received_block = malloc(sizeof(block_t));
+
+                block_t *received_block = blockchain_parse_received_block(serialized_data, payload_len);
                 if (!received_block) {
-                    ESP_LOGE(TAG, "Failed to allocate memory for received block");
                     return;
-                }
-                memset(received_block, 0, sizeof(block_t));
-                
-                memcpy(&received_block->timestamp, serialized_data + offset, sizeof(received_block->timestamp));
-                offset += sizeof(received_block->timestamp);
-                memcpy(received_block->prev_hash, serialized_data + offset, 32);
-                offset += 32;
-                memcpy(received_block->hash, serialized_data + offset, 32);
-                offset += 32;
-                memcpy(received_block->pop_proof, serialized_data + offset, sizeof(received_block->pop_proof));
-                offset += sizeof(received_block->pop_proof);
-                memcpy(received_block->heatmap, serialized_data + offset, HEATMAP_SIZE);
-                offset += HEATMAP_SIZE;
-                memcpy(&received_block->num_sensor_readings, serialized_data + offset, sizeof(received_block->num_sensor_readings));
-                offset += sizeof(received_block->num_sensor_readings);
-                
-                size_t expected_size = header_size + (received_block->num_sensor_readings * sensor_size);
-                if (payload_len != (int)expected_size) {
-                    ESP_LOGE(TAG, "Received block size mismatch: expected %d, got %d", (int)(expected_size + 1), len);
-                    free(received_block);
-                    return;
-                }
-                
-                sensor_record_t *head = NULL, *tail = NULL;
-                for (uint32_t i = 0; i < received_block->num_sensor_readings; i++) {
-                    sensor_record_t *rec = malloc(sizeof(sensor_record_t));
-                    if (!rec) {
-                        ESP_LOGE(TAG, "Failed to allocate memory for sensor record");
-                        // (Free previously allocated sensor records here)
-                        break;
-                    }
-                    memset(rec, 0, sizeof(sensor_record_t));
-                    memcpy(rec->mac, serialized_data + offset, sizeof(rec->mac));
-                    offset += sizeof(rec->mac);
-                    memcpy(&rec->timestamp, serialized_data + offset, sizeof(rec->timestamp));
-                    offset += sizeof(rec->timestamp);
-                    memcpy(&rec->temperature, serialized_data + offset, sizeof(rec->temperature));
-                    offset += sizeof(rec->temperature);
-                    memcpy(&rec->humidity, serialized_data + offset, sizeof(rec->humidity));
-                    offset += sizeof(rec->humidity);
-                    memcpy(rec->rssi, serialized_data + offset, MAX_NEIGHBORS * sizeof(int8_t));
-                    offset += MAX_NEIGHBORS * sizeof(int8_t);
-                    rec->next = NULL;
-                    if (head == NULL) {
-                        head = rec;
-                        tail = rec;
-                    } else {
-                        tail->next = rec;
-                        tail = rec;
-                    }
-                }
-                received_block->node_data = head;
+                }               
                 
                 // Create a temporary copy of the block to validate hash.
                 block_t temp_block = *received_block;
@@ -239,6 +180,10 @@ void espnow_recv_cb(const uint8_t *mac_addr, const uint8_t *data, int len)
             ESP_LOGI(TAG, "Received reset command from " MACSTR, MAC2STR(mac_addr));
             blockchain_deinit();
             blockchain_init();
+            break;
+        case CMD_REQUEST_SPECIFIC_BLOCK:
+            ESP_LOGI(TAG, "Received request for specific block from " MACSTR, MAC2STR(mac_addr));
+            // Handle the request for a specific block here.
             break;
         default:
             ESP_LOGI(TAG, "Received unknown command 0x%02x from " MACSTR, cmd, MAC2STR(mac_addr));
