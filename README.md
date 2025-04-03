@@ -30,6 +30,7 @@ Weather Mesh Lite is a distributed sensor network project built using ESP Mesh L
 
 ## Goals Still To Be Achieved
 - [ ] Implement full blockchain synchronization between nodes.
+- [ ] Proximity of neighbours via RSSI.
 - [ ] Save blockchain to file system/flash instead of RAM.
 - [ ] Add SD card for larger blockchains.
 - [ ] Enhance security with data encryption and secure peer authentication.
