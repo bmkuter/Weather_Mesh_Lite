@@ -117,30 +117,27 @@ void espnow_recv_cb(const uint8_t *mac_addr, const uint8_t *data, int len)
                 ESP_LOGI(TAG, "Adding new block:");
                 blockchain_print_block_struct(received_block);
                 
+                // Track previous block
+                block_t last_block;
+                blockchain_get_last_block(&last_block);
+
                 // Add the block to the blockchain (which now expects a pointer).
                 blockchain_add_block(received_block);
-           
-                block_t last_block;
-                if (blockchain_get_last_block(&last_block)) {
-                    uint32_t expected_num = last_block.block_num + 1;
-                    ESP_LOGI(TAG, "Expected block number: %" PRIu32, expected_num);
-                    if (received_block->block_num == expected_num) {
-                        ESP_LOGI(TAG, "Block number matches expected.");
-                    } else {
-                        ESP_LOGW(TAG, "Block number mismatch. Expected: %" PRIu32 ", got: %" PRIu32, expected_num, received_block->block_num);
-                    }
-                    if (received_block->block_num != expected_num) {
-                        ESP_LOGW(TAG, "Block number mismatch. Expected: %" PRIu32 ", got: %" PRIu32, expected_num, received_block->block_num);
-                        if (received_block->block_num > expected_num) {
-                            uint8_t send_buffer[1 + sizeof(uint32_t)];
-                            send_buffer[0] = CMD_REQUEST_SPECIFIC_BLOCK;
-                            uint32_t missing_block_num = expected_num;
-                            memcpy(send_buffer + 1, &missing_block_num, sizeof(uint32_t));
-                            espnow_send_wrapper(ESPNOW_DATA_TYPE_RESERVE, broadcast_mac, send_buffer, sizeof(send_buffer));
-                        }
+
+                uint32_t expected_num = last_block.block_num + 1;
+                ESP_LOGI(TAG, "Expected block number: %" PRIu32, expected_num);
+                if (received_block->block_num == expected_num) {
+                    ESP_LOGI(TAG, "Block number matches expected.");
+                } else {
+                    ESP_LOGW(TAG, "Block number mismatch. Expected: %" PRIu32 ", got: %" PRIu32, expected_num, received_block->block_num);
+                    if (received_block->block_num > expected_num) {
+                        uint8_t send_buffer[1 + sizeof(uint32_t)];
+                        send_buffer[0] = CMD_REQUEST_SPECIFIC_BLOCK;
+                        uint32_t missing_block_num = expected_num;
+                        memcpy(send_buffer + 1, &missing_block_num, sizeof(uint32_t));
+                        espnow_send_wrapper(ESPNOW_DATA_TYPE_RESERVE, broadcast_mac, send_buffer, sizeof(send_buffer));
                     }
                 }
-
             }
             break;
         case CMD_SENSOR_DATA:
