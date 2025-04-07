@@ -559,6 +559,12 @@ void sensor_blockchain_task(void *pvParameters)
 
             // For each node (excluding leader), send a pulse and wait for response.
             while (list) {
+                // Skip this node if it is our own MAC address.
+                if (memcmp(list->node->mac_addr, my_mac, ESP_NOW_ETH_ALEN) == 0) {
+                    ESP_LOGI(TAG, "Skipping self node " MACSTR, MAC2STR(my_mac));
+                    list = list->next;
+                    continue;
+                }
                 ESP_LOGI(TAG, "Sending pulse to " MACSTR, MAC2STR(list->node->mac_addr));
                 esp_err_t ret = espnow_send_wrapper(ESPNOW_DATA_TYPE_RESERVE, list->node->mac_addr,
                                                     &pulse_cmd, sizeof(pulse_cmd));
