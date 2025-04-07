@@ -469,6 +469,7 @@ void mesh_networking_task(void *pvParameters)
         if (node_count > 0) {
             ESP_LOGE(TAG, "Mesh network formed with %" PRIu32 " nodes", node_count);
             // Start the blockchain receiver task.
+            add_self_broadcast_peer();
             xTaskCreate(sensor_blockchain_task, "sensor_blockchain_task", 4096 * 2, NULL, 5, NULL);
             break;
         } else {
