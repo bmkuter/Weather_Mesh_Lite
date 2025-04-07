@@ -71,7 +71,7 @@ void calculate_block_hash(block_t *block) {
     }
     
     ESP_LOGI(TAG, "Block serialized for hash calculation, total bytes: %d", total_size);
-    ESP_LOG_BUFFER_HEX_LEVEL(TAG, serial_buffer, total_size, ESP_LOG_INFO);
+    // ESP_LOG_BUFFER_HEX_LEVEL(TAG, serial_buffer, total_size, ESP_LOG_INFO);
     
     uint8_t computed_hash[32] = {0};
     mbedtls_sha256_context ctx;
@@ -142,7 +142,7 @@ size_t blockchain_serialize_block(const block_t *block, uint8_t **out_buffer) {
     return total_size;
 }
 
-block_t *blockchain_parse_received_block(const uint8_t *serialized_data, int payload_len)
+block_t *blockchain_parse_received_serialized_block(const uint8_t *serialized_data, int payload_len)
 {
     // New header: block_num, timestamp, prev_hash, hash, pop_proof, heatmap, num_sensor_readings.
     size_t header_size = sizeof(uint32_t) + sizeof(uint32_t) + 32 + 32 +
@@ -287,6 +287,30 @@ bool blockchain_add_block(block_t *new_block)
     }
     return result;
 }
+
+bool blockchain_insert_block(block_t *new_block)
+{
+    bool result = false;
+    if (xSemaphoreTake(blockchain_mutex, portMAX_DELAY)) {
+        block_t *prev = NULL;
+        block_t *cur = blockchain_head;
+        while (cur && cur->block_num < new_block->block_num) {
+            prev = cur;
+            cur = cur->next;
+        }
+        new_block->next = cur;
+        if (!prev) {
+            blockchain_head = new_block;
+        } else {
+            prev->next = new_block;
+        }
+        blockchain_count++;
+        result = true;
+        xSemaphoreGive(blockchain_mutex);
+    }
+    return result;
+}
+
 bool blockchain_get_last_block(block_t *block_out)
 {
     bool result = false;
@@ -302,6 +326,24 @@ bool blockchain_get_last_block(block_t *block_out)
         xSemaphoreGive(blockchain_mutex);
     }
     return result;
+}
+
+bool blockchain_get_block_by_number(uint32_t block_num, block_t *block_out)
+{
+    bool found = false;
+    if (xSemaphoreTake(blockchain_mutex, portMAX_DELAY)) {
+        block_t *cur = blockchain_head;
+        while (cur) {
+            if (cur->block_num == block_num) {
+                memcpy(block_out, cur, sizeof(block_t));
+                found = true;
+                break;
+            }
+            cur = cur->next;
+        }
+        xSemaphoreGive(blockchain_mutex);
+    }
+    return found;
 }
 
 /**
@@ -332,6 +374,24 @@ void blockchain_print_history(void)
         }
         ESP_LOGI(TAG, "========================================");
         xSemaphoreGive(blockchain_mutex);
+    }
+}
+
+void blockchain_print_block_struct(block_t *block)
+{
+    ESP_LOGI(TAG, "Block Number: %" PRIu32, block->block_num);
+    ESP_LOGI(TAG, "Timestamp: 0x%" PRIx32, block->timestamp);
+    ESP_LOGI(TAG, "Prev Hash:");
+    ESP_LOG_BUFFER_HEX_LEVEL(TAG, block->prev_hash, 32, ESP_LOG_INFO);
+    ESP_LOGI(TAG, "Block Hash:");
+    ESP_LOG_BUFFER_HEX_LEVEL(TAG, block->hash, 32, ESP_LOG_INFO);
+    ESP_LOGI(TAG, "PoP Proof: %s", block->pop_proof);
+    ESP_LOGI(TAG, "Sensor Readings (Total: %" PRIu32 "):", block->num_sensor_readings);
+    sensor_record_t *record = block->node_data;
+    while (record) {
+        ESP_LOGI(TAG, "  Sensor " MACSTR ": Temp: %.2f°C, Humidity: %.2f%%",
+                 MAC2STR(record->mac), record->temperature, record->humidity);
+        record = record->next;
     }
 }
 
@@ -399,6 +459,26 @@ static void blockchain_append_sensor(block_t *block, const sensor_record_t *reco
              record->temperature, record->humidity, block->num_sensor_readings);
 }
 
+// Helper task to determine if mesh network is formed and we can activate the blockchain receiver task.
+void mesh_networking_task(void *pvParameters)
+{
+    ESP_LOGI(TAG, "Starting mesh_networking_task");
+    while (1) {
+        uint32_t node_count = 0;
+        const node_info_list_t *list = esp_mesh_lite_get_nodes_list(&node_count);
+        if (node_count > 0) {
+            ESP_LOGE(TAG, "Mesh network formed with %" PRIu32 " nodes", node_count);
+            // Start the blockchain receiver task.
+            xTaskCreate(sensor_blockchain_task, "sensor_blockchain_task", 4096 * 2, NULL, 5, NULL);
+            break;
+        } else {
+            ESP_LOGI(TAG, "Mesh network not yet formed. Waiting...");
+            vTaskDelay(pdMS_TO_TICKS(5000));
+        }
+    }
+    vTaskDelete(NULL);
+}
+
 // In sensor_blockchain_task: update timestamp and calculate hash before Proof-of-participation.
 void sensor_blockchain_task(void *pvParameters)
 {
@@ -412,6 +492,10 @@ void sensor_blockchain_task(void *pvParameters)
     
     ESP_LOGV(TAG, "Blockchain initialized");
     consensus_init();
+    
+    // Register ESPNOW receive callback
+    ESP_LOGI(TAG, "Registering ESPNOW receive callback");
+    esp_mesh_lite_espnow_recv_cb_register(ESPNOW_DATA_TYPE_RESERVE, espnow_recv_cb);
 
     ESP_LOGI(TAG, "Starting sensor_blockchain_task");
 
@@ -558,6 +642,7 @@ void sensor_blockchain_task(void *pvParameters)
                 // Setting our own record of the elected node
                 memcpy(elected_leader_mac, selected->node->mac_addr, ESP_NOW_ETH_ALEN);
                 ESP_LOGI(TAG, "Selected next leader: " MACSTR, MAC2STR(selected->node->mac_addr));
+                ESP_LOGI(TAG, "My MAC: " MACSTR, MAC2STR(my_mac));
                 // Broadcast the election message using the broadcast MAC address.
                 uint8_t bcast_mac[ESP_NOW_ETH_ALEN] = {0xFF,0xFF,0xFF,0xFF,0xFF,0xFF};
                 esp_err_t ret_e = espnow_send_wrapper(ESPNOW_DATA_TYPE_RESERVE, bcast_mac,

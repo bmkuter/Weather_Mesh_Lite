@@ -58,16 +58,11 @@ void ip_event_sta_got_ip_handler(void *arg, esp_event_base_t event_base,
         ESP_LOGI(TAG, "Got IP Address: " IPSTR, IP2STR(&ip_info.ip));
     }
 
-    xTaskCreate(sensor_blockchain_task, "sensor_blockchain_task", 4096 * 2, NULL, 5, NULL);
-    // Register ESPNOW receive callback
-    esp_mesh_lite_espnow_recv_cb_register(ESPNOW_DATA_TYPE_RESERVE, espnow_recv_cb);
-
     if (!tcp_task) {
         xTaskCreate(tcp_server_task, "tcp_server_task", 4 * 1024, NULL, 5, NULL);
         tcp_task = true;
     }
 }
-
 
 void app_main()
 {
@@ -122,8 +117,5 @@ void app_main()
 
     vTaskDelay(3000/portTICK_PERIOD_MS);    
 
-    // xTaskCreate(sensor_blockchain_task, "sensor_blockchain_task", 4096 * 2, NULL, 5, NULL);
-    // // Register ESPNOW receive callback
-    // esp_mesh_lite_espnow_recv_cb_register(ESPNOW_DATA_TYPE_RESERVE, espnow_recv_cb);
-    // add_self_broadcast_peer();
+    xTaskCreate(mesh_networking_task, "mesh_networking_task", 4096, NULL, 5, NULL);
 }

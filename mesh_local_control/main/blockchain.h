@@ -37,13 +37,17 @@ uint32_t blockchain_init(void);
 void blockchain_deinit(void);
 void blockchain_create_block(block_t *new_block, sensor_record_t sensor_data[MAX_NODES]);
 bool blockchain_add_block(block_t *new_block);
+bool blockchain_insert_block(block_t *block);
 bool blockchain_get_last_block(block_t *block_out);
 void blockchain_print_history(void);
+void blockchain_print_block_struct(block_t *block);
 void blockchain_receive_block(const uint8_t *data, uint16_t len);
 void sensor_blockchain_task(void *pvParameters);
+void mesh_networking_task(void *pvParameters);
 void calculate_block_hash(block_t *block);
-block_t *blockchain_parse_received_block(const uint8_t *serialized_data, int payload_len);
+block_t *blockchain_parse_received_serialized_block(const uint8_t *serialized_data, int payload_len);
 size_t blockchain_serialize_block(const block_t *block, uint8_t **out_buffer);
+bool blockchain_get_block_by_number(uint32_t block_num, block_t *block_out);
 
 // Helper: size of a sensor record (excluding the pointer)
 static const size_t sensor_size = sizeof(uint8_t)*ESP_NOW_ETH_ALEN + sizeof(uint32_t) + sizeof(float)*2 + (MAX_NEIGHBORS*sizeof(int8_t));

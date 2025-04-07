@@ -9,6 +9,8 @@ uint8_t broadcast_mac[ESP_NOW_ETH_ALEN] = {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF};
 
 void espnow_recv_cb(const uint8_t *mac_addr, const uint8_t *data, int len)
 {
+    ESP_LOGW(TAG, "Received data from " MACSTR, MAC2STR(mac_addr));
+
     if (len < 1) return; // must have at least the command byte
     uint8_t cmd = data[0];
     switch (cmd) {
@@ -76,7 +78,7 @@ void espnow_recv_cb(const uint8_t *mac_addr, const uint8_t *data, int len)
                 const uint8_t *serialized_data = data + 1;
                 int payload_len = len - 1;
 
-                block_t *received_block = blockchain_parse_received_block(serialized_data, payload_len);
+                block_t *received_block = blockchain_parse_received_serialized_block(serialized_data, payload_len);
                 if (!received_block) {
                     return;
                 }               
@@ -85,36 +87,10 @@ void espnow_recv_cb(const uint8_t *mac_addr, const uint8_t *data, int len)
                 block_t temp_block = *received_block;
                 memset(temp_block.hash, 0, sizeof(temp_block.hash));
                 ESP_LOGW(TAG, "Temp Block:");
-                ESP_LOGI(TAG, "Timestamp: %" PRIu32, temp_block.timestamp);
-                ESP_LOGI(TAG, "Prev Hash: ");
-                ESP_LOG_BUFFER_HEX_LEVEL(TAG, temp_block.prev_hash, 32, ESP_LOG_INFO);
-                ESP_LOGI(TAG, "Block Hash (zeroed): ");
-                ESP_LOG_BUFFER_HEX_LEVEL(TAG, temp_block.hash, 32, ESP_LOG_INFO);
-                ESP_LOGI(TAG, "PoP Proof: %s", temp_block.pop_proof);
-                ESP_LOGI(TAG, "Sensor readings count: %" PRIu32, temp_block.num_sensor_readings);
-                
-                // Print sensor records for debugging.
-                sensor_record_t *cur = temp_block.node_data;
-                while (cur) {
-                    ESP_LOGI(TAG, "Sensor " MACSTR ": Temp: %.2f°C, Humidity: %.2f%%",
-                             MAC2STR(cur->mac), cur->temperature, cur->humidity);
-                    cur = cur->next;
-                }
+                blockchain_print_block_struct(&temp_block);
                 
                 ESP_LOGW(TAG, "Recv Block:");
-                ESP_LOGI(TAG, "Timestamp: %" PRIu32, received_block->timestamp);
-                ESP_LOGI(TAG, "Prev Hash: ");
-                ESP_LOG_BUFFER_HEX_LEVEL(TAG, received_block->prev_hash, 32, ESP_LOG_INFO);
-                ESP_LOGI(TAG, "Block Hash: ");
-                ESP_LOG_BUFFER_HEX_LEVEL(TAG, received_block->hash, 32, ESP_LOG_INFO);
-                ESP_LOGI(TAG, "PoP Proof: %s", received_block->pop_proof);
-                ESP_LOGI(TAG, "Sensor readings count: %" PRIu32, received_block->num_sensor_readings);
-                cur = received_block->node_data;
-                while (cur) {
-                    ESP_LOGI(TAG, "Sensor " MACSTR ": Temp: %.2f°C, Humidity: %.2f%%",
-                             MAC2STR(cur->mac), cur->temperature, cur->humidity);
-                    cur = cur->next;
-                }
+                blockchain_print_block_struct(received_block);
             
                 // Compute and validate the block hash.
                 calculate_block_hash(&temp_block);
@@ -126,7 +102,7 @@ void espnow_recv_cb(const uint8_t *mac_addr, const uint8_t *data, int len)
                     ESP_LOG_BUFFER_HEX_LEVEL(TAG, temp_block.hash, 32, ESP_LOG_INFO);
                     ESP_LOG_BUFFER_HEX_LEVEL(TAG, received_block->hash, 32, ESP_LOG_INFO);
                     // Free allocated sensor records and block before returning.
-                    cur = received_block->node_data;
+                    sensor_record_t *cur = received_block->node_data;
                     while (cur) {
                         sensor_record_t *next = cur->next;
                         free(cur);
@@ -138,23 +114,33 @@ void espnow_recv_cb(const uint8_t *mac_addr, const uint8_t *data, int len)
                     ESP_LOGI(TAG, "Block hash validated successfully.");
                 }
                 
-                ESP_LOGI(TAG, "Received new block:");
-                ESP_LOGI(TAG, "Timestamp: %" PRIu32, received_block->timestamp);
-                ESP_LOGI(TAG, "Prev Hash: ");
-                ESP_LOG_BUFFER_HEX_LEVEL(TAG, received_block->prev_hash, 32, ESP_LOG_INFO);
-                ESP_LOGI(TAG, "Hash: ");
-                ESP_LOG_BUFFER_HEX_LEVEL(TAG, received_block->hash, 32, ESP_LOG_INFO);
-                ESP_LOGI(TAG, "PoP Proof: %s", received_block->pop_proof);
-                ESP_LOGI(TAG, "Sensor readings count: %" PRIu32, received_block->num_sensor_readings);
-                cur = received_block->node_data;
-                while (cur) {
-                    ESP_LOGI(TAG, "Sensor " MACSTR ": Temp: %.2f°C, Humidity: %.2f%%",
-                             MAC2STR(cur->mac), cur->temperature, cur->humidity);
-                    cur = cur->next;
-                }
+                ESP_LOGI(TAG, "Adding new block:");
+                blockchain_print_block_struct(received_block);
                 
                 // Add the block to the blockchain (which now expects a pointer).
                 blockchain_add_block(received_block);
+           
+                block_t last_block;
+                if (blockchain_get_last_block(&last_block)) {
+                    uint32_t expected_num = last_block.block_num + 1;
+                    ESP_LOGI(TAG, "Expected block number: %" PRIu32, expected_num);
+                    if (received_block->block_num == expected_num) {
+                        ESP_LOGI(TAG, "Block number matches expected.");
+                    } else {
+                        ESP_LOGW(TAG, "Block number mismatch. Expected: %" PRIu32 ", got: %" PRIu32, expected_num, received_block->block_num);
+                    }
+                    if (received_block->block_num != expected_num) {
+                        ESP_LOGW(TAG, "Block number mismatch. Expected: %" PRIu32 ", got: %" PRIu32, expected_num, received_block->block_num);
+                        if (received_block->block_num > expected_num) {
+                            uint8_t send_buffer[1 + sizeof(uint32_t)];
+                            send_buffer[0] = CMD_REQUEST_SPECIFIC_BLOCK;
+                            uint32_t missing_block_num = expected_num;
+                            memcpy(send_buffer + 1, &missing_block_num, sizeof(uint32_t));
+                            espnow_send_wrapper(ESPNOW_DATA_TYPE_RESERVE, broadcast_mac, send_buffer, sizeof(send_buffer));
+                        }
+                    }
+                }
+
             }
             break;
         case CMD_SENSOR_DATA:
@@ -182,9 +168,66 @@ void espnow_recv_cb(const uint8_t *mac_addr, const uint8_t *data, int len)
             blockchain_init();
             break;
         case CMD_REQUEST_SPECIFIC_BLOCK:
-            ESP_LOGI(TAG, "Received request for specific block from " MACSTR, MAC2STR(mac_addr));
-            // Handle the request for a specific block here.
-            break;
+            {
+                ESP_LOGI(TAG, "Received request for specific block from " MACSTR, MAC2STR(mac_addr));
+                if (len < 1 + sizeof(uint32_t)) {
+                    ESP_LOGE(TAG, "Invalid request length");
+                    break;
+                }
+                uint32_t requested_block_num;
+                memcpy(&requested_block_num, data + 1, sizeof(requested_block_num));
+                ESP_LOGI(TAG, "Missing block requested: %" PRIu32, requested_block_num);
+
+                // If current node is root, get the block and broadcast it
+                if (esp_mesh_lite_get_level() <= 1) {
+                    block_t missing_block;
+                    if (blockchain_get_block_by_number(requested_block_num, &missing_block)) {
+                        // Serialize and broadcast as CMD_HISTORICAL_BLOCK
+                        uint8_t *serialized_block = NULL;
+                        size_t block_size = blockchain_serialize_block(&missing_block, &serialized_block);
+                        if (block_size > 0) {
+                            uint8_t send_buffer[1 + block_size];
+                            send_buffer[0] = CMD_HISTORICAL_BLOCK;
+                            memcpy(send_buffer + 1, serialized_block, block_size);
+                            espnow_send_wrapper(ESPNOW_DATA_TYPE_RESERVE, broadcast_mac, send_buffer, sizeof(send_buffer));
+                            free(serialized_block);
+                        }
+                    } else {
+                        ESP_LOGW(TAG, "Requested block not found");
+                    }
+                }
+                break;
+            }
+        case CMD_HISTORICAL_BLOCK:
+            {
+                // Parse the received block, validate hash, then insert in correct place
+                const uint8_t *serialized_data = data + 1;
+                int payload_len = len - 1;
+                block_t *received_block = blockchain_parse_received_serialized_block(serialized_data, payload_len);
+                if (!received_block) { break; }
+                
+                // Create a temporary copy of the block to validate hash.
+                block_t temp_block = *received_block;
+                memset(temp_block.hash, 0, sizeof(temp_block.hash));
+                calculate_block_hash(&temp_block);
+                
+                if (memcmp(temp_block.hash, received_block->hash, 32) != 0) {
+                    ESP_LOGE(TAG, "Historical block hash validation failed!");
+                    free(received_block);
+                    break;
+                } else {
+                    ESP_LOGI(TAG, "Historical block hash validated successfully.");
+                }
+
+                ESP_LOGI(TAG, "Adding new block:");
+                blockchain_print_block_struct(received_block);
+
+                if (!blockchain_insert_block(received_block)) {
+                    ESP_LOGE(TAG, "Failed to insert historical block");
+                    free(received_block);
+                }
+                break;
+            }
         default:
             ESP_LOGI(TAG, "Received unknown command 0x%02x from " MACSTR, cmd, MAC2STR(mac_addr));
             break;
