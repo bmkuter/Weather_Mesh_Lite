@@ -214,14 +214,37 @@ void espnow_recv_cb(const uint8_t *mac_addr, const uint8_t *data, int len)
                     break;
                 } else {
                     ESP_LOGI(TAG, "Historical block hash validated successfully.");
-                }
+                    block_t local_copy;
+                    if (blockchain_get_block_by_number(received_block->block_num, &local_copy)) {
+                        if (memcmp(local_copy.hash, received_block->hash, 32) != 0) {
+                            ESP_LOGW(TAG, "Local block %u differs from broadcasted block!", received_block->block_num);
+                        } else {
+                            ESP_LOGI(TAG, "We already have the same block %u, skipping insert.", received_block->block_num);
+                        }
+                        free(received_block);
+                    } else {
+                        ESP_LOGI(TAG, "Adding new block:");
+                        blockchain_print_block_struct(received_block);
 
-                ESP_LOGI(TAG, "Adding new block:");
-                blockchain_print_block_struct(received_block);
-
-                if (!blockchain_insert_block(received_block)) {
-                    ESP_LOGE(TAG, "Failed to insert historical block");
-                    free(received_block);
+                        if (!blockchain_insert_block(received_block)) {
+                            ESP_LOGE(TAG, "Failed to insert historical block");
+                            free(received_block);
+                        } else {
+                            uint32_t inserted_num = received_block->block_num;
+                            while (inserted_num > 0) {
+                                block_t check_block;
+                                if (blockchain_get_block_by_number(inserted_num - 1, &check_block)) {
+                                    break; // No gap at this level
+                                }
+                                uint8_t req_buf[1 + sizeof(uint32_t)];
+                                req_buf[0] = CMD_REQUEST_SPECIFIC_BLOCK;
+                                uint32_t needed_num = inserted_num - 1;
+                                memcpy(req_buf + 1, &needed_num, sizeof(uint32_t));
+                                espnow_send_wrapper(ESPNOW_DATA_TYPE_RESERVE, broadcast_mac, req_buf, sizeof(req_buf));
+                                inserted_num--;
+                            }
+                        }
+                    }
                 }
                 break;
             }
@@ -279,6 +302,19 @@ void espnow_periodic_send_task(void *arg)
             }
         }
         vTaskDelay(pdMS_TO_TICKS(3000));
+    }
+}
+
+void espnow_ledger_check_task(void *arg)
+{
+    while (1) {
+        // Check if we're the leader
+        if (consensus_am_i_leader(0)) {
+            ESP_LOGI(TAG, "Performing ledger check (skeleton)");
+            // Iterate over the ledger, gather block_num and hash
+            // TODO: implement majority-based ledger validation
+        }
+        vTaskDelay(pdMS_TO_TICKS(30000));
     }
 }
 
